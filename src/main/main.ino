@@ -4,6 +4,7 @@
 #include <SD.h>
 #include <Adafruit_VL53L0X.h>
 
+#include <Logger.hpp>
 #include <GesturePreprocessor.hpp>
 #include <GestureClassifier.hpp>
 #include <Speaker.hpp>
@@ -20,6 +21,15 @@
 
 #define SD_CS     9
 
+#define LED_G  1    // green  -> GPIO 1
+#define LED_B  13   // blue   -> GPIO 13
+#define LED_R  12   // red    -> GPIO 12
+#define BUTTON_PIN 21
+
+
+SemaphoreHandle_t g_sdMutex = nullptr;
+volatile bool     g_systemEnabled = true;
+
 Adafruit_VL53L0X L;
 Adafruit_VL53L0X R;
 Adafruit_VL53L0X T;
@@ -33,6 +43,28 @@ const char* kTracks[] = {
 };
 const size_t kNumTracks = sizeof(kTracks) / sizeof(kTracks[0]);
 
+volatile uint32_t g_lastButtonPressMs = 0;
+
+void IRAM_ATTR buttonISR() {
+  uint32_t now = millis();
+  // Debounce: ignore if within 300ms of last press
+  if (now - g_lastButtonPressMs < 300) {
+    return;
+  }
+  g_lastButtonPressMs = now;
+
+  // Toggle system state
+  g_systemEnabled = !g_systemEnabled;
+
+  if (g_systemEnabled) {
+    // Resume: unpause speaker
+    Speaker::pauseToggle();
+  } else {
+    // Pause: pause speaker
+    Speaker::pauseToggle();
+  }
+}
+
 bool initSensor(Adafruit_VL53L0X &sensor, int xshutPin, uint8_t newAddr) {
   pinMode(xshutPin, OUTPUT);
   digitalWrite(xshutPin, LOW);
@@ -40,8 +72,13 @@ bool initSensor(Adafruit_VL53L0X &sensor, int xshutPin, uint8_t newAddr) {
   digitalWrite(xshutPin, HIGH);
   delay(5);
   if (!sensor.begin(newAddr, false, &Wire)) {
-    Serial.print("Failed to init VL53L0X at addr 0x");
-    Serial.println(newAddr, HEX);
+    Logger::logf(Logger::Level::Error,
+                 "Failed to init VL53L0X at addr 0x%02X",
+                 newAddr);
+    LOGGER_DEBUG(
+      Serial.print("Failed to init VL53L0X at addr 0x");
+      Serial.println(newAddr, HEX);
+    );
     return false;
   }
   return true;
@@ -58,6 +95,13 @@ uint16_t readVL(Adafruit_VL53L0X &s) {
 
 void gestureTask(void* arg) {
   for (;;) {
+    if (!g_systemEnabled) {
+      // System disabled - show red LED and skip gesture processing
+      Logger::ledError();
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
     uint32_t now = millis();
 
     uint16_t dL = readVL(L);
@@ -81,45 +125,58 @@ void gestureTask(void* arg) {
 
       GestureDir dir = classifyEpisode(ep);
 
-      Serial.print("EPISODE dur=");
-      Serial.print(dur);
-      Serial.print("ms  swing(L,R,T)=");
-      Serial.print(swingL); Serial.print(",");
-      Serial.print(swingR); Serial.print(",");
-      Serial.print(swingT); Serial.print("  maxV(L,R,T)=");
-      Serial.print(ep.maxApproachVel[0]); Serial.print(",");
-      Serial.print(ep.maxApproachVel[1]); Serial.print(",");
-      Serial.print(ep.maxApproachVel[2]);
-      Serial.print("  -> ");
+      LOGGER_DEBUG(
+        Serial.print("EPISODE dur=");
+        Serial.print(dur);
+        Serial.print("ms  swing(L,R,T)=");
+        Serial.print(swingL); Serial.print(",");
+        Serial.print(swingR); Serial.print(",");
+        Serial.print(swingT); Serial.print("  maxV(L,R,T)=");
+        Serial.print(ep.maxApproachVel[0]); Serial.print(",");
+        Serial.print(ep.maxApproachVel[1]); Serial.print(",");
+        Serial.print(ep.maxApproachVel[2]);
+        Serial.print("  -> ");
+      );
+
+      if (dir == GestureDir::None) {
+        Logger::ledWarn();
+      } else {
+        Logger::ledBusy();
+      }
 
       switch (dir) {
         case GestureDir::Left:
-          Serial.println("LEFT -> prevTrack()");
+          Logger::log(Logger::Level::Info, "Gesture recognized: LEFT");
+          LOGGER_DEBUG(Serial.println("LEFT -> prevTrack()"));
           Speaker::prevTrack();
           break;
 
         case GestureDir::Right:
-          Serial.println("RIGHT -> nextTrack()");
+          Logger::log(Logger::Level::Info, "Gesture recognized: RIGHT");
+          LOGGER_DEBUG(Serial.println("RIGHT -> nextTrack()"));
           Speaker::nextTrack();
           break;
 
         case GestureDir::Up:
-          Serial.println("UP -> volumeUp()");
+          Logger::log(Logger::Level::Info, "Gesture recognized: UP");
+          LOGGER_DEBUG(Serial.println("UP -> volumeUp()"));
           Speaker::volumeUp();
           break;
 
         case GestureDir::Down:
-          Serial.println("DOWN -> volumeDown()");
+          Logger::log(Logger::Level::Info, "Gesture recognized: DOWN");
+          LOGGER_DEBUG(Serial.println("DOWN -> volumeDown()"));
           Speaker::volumeDown();
           break;
 
         case GestureDir::Tap:
-          Serial.println("TAP -> pauseToggle()");
+          Logger::log(Logger::Level::Info, "Gesture recognized: TAP");
+          LOGGER_DEBUG(Serial.println("TAP -> pauseToggle()"));
           Speaker::pauseToggle();
           break;
 
         default:
-          Serial.println("NONE");
+          LOGGER_DEBUG(Serial.println("NONE"));
           break;
       }
     }
@@ -131,6 +188,12 @@ void gestureTask(void* arg) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
+
+  if (!g_sdMutex) {
+    g_sdMutex = xSemaphoreCreateMutex();
+  }
+
+  Logger::init(g_sdMutex, "/system.log", LED_R, LED_G, LED_B);
 
   Wire.begin(SDA_PIN, SCL_PIN);
 
@@ -146,21 +209,27 @@ void setup() {
   initSensor(R, XSHUT_R, ADDR_R);
   initSensor(T, XSHUT_T, ADDR_T);
 
-  Serial.println("VL53L0X triangle + gesture episode detector ready");
+  LOGGER_DEBUG(Serial.println("VL53L0X triangle + gesture episode detector ready"));
 
   SPI.begin(18, 19, 23, SD_CS);
   if (!SD.begin(SD_CS, SPI, 10000000)) {
-  Serial.println("SD init failed");
-  while (true) vTaskDelay(portMAX_DELAY);
+    Logger::log(Logger::Level::Error, "SD init failed");
+    LOGGER_DEBUG(Serial.println("SD init failed"));
+    while (true) vTaskDelay(portMAX_DELAY);
   }
 
   if (!Speaker::initMax98357A(8, 22, 15, 44100)) {
-    Serial.println("I2S init failed");
+    Logger::log(Logger::Level::Error, "I2S init failed");
+    LOGGER_DEBUG(Serial.println("I2S init failed"));
     while (true) vTaskDelay(portMAX_DELAY);
   }
 
   Speaker::setPlaylist(kTracks, kNumTracks);
   Speaker::startPlayer();  // spawns audio FreeRTOS task inside Speaker
+
+  // Setup button interrupt with highest priority
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonISR, FALLING);
 
   xTaskCreate(
     gestureTask,

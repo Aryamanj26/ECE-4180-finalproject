@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <GestureTypes.hpp>
+#include <Logger.hpp>
 
 struct GestureEpisode {
     uint32_t tStartMs = 0;
@@ -12,11 +13,11 @@ struct GestureEpisode {
     uint8_t  sampleCount   = 0;
     uint8_t  winnerChanges = 0;
 
-    // NEW: when each sensor first/last saw the object in this episode
+    // when each sensor first/last saw the object in this episode
     uint32_t firstSeenMs[3] = { 0, 0, 0 };
     uint32_t lastSeenMs[3]  = { 0, 0, 0 };
 
-    // NEW: peak approach velocity (mm/s) toward sensors per sensor
+    // peak approach velocity (mm/s) toward sensors per sensor
     int16_t  maxApproachVel[3] = { 0, 0, 0 };
 };
 
@@ -24,6 +25,18 @@ class GesturePreprocessor {
 public:
     GesturePreprocessor() { reset(); }
 
+    /**
+     *  WHat this function does is:
+     *  1) take raw distance readings from the three sensors,
+     *  2) process them through filtering and gating, and update the internal FSM state.
+     * 
+     *  Data processing includes:
+     * - smoothing/filtering of raw distance readings using ema filter. low pass smoothing goal.
+     * - nearest-depth gating
+     * - validation of data.
+     * 
+     * 3) 
+     */
     GestureEvent update(uint16_t d0, uint16_t d1, uint16_t d2, uint32_t nowMs) {
     uint16_t raw[3] = { d0, d1, d2 };
     filterDistances(raw);
@@ -50,9 +63,10 @@ public:
 
     switch (state) {
         case State::Idle:
+            Logger::ledIdle();
             if (anyValid) {
                 if (++enterCount >= ENTER_COUNT) {
-                    Serial.println("[FSM] Idle -> Tracking");
+                    LOGGER_DEBUG(Serial.println("[FSM] Idle -> Tracking"));
                     startEpisode(nowMs);
                     appendSample(valid, nowMs);
                     state = State::Tracking;
@@ -71,27 +85,27 @@ public:
 
                 // time-based ending
                 if (nowMs - ep.tStartMs > MAX_EPISODE_MS) {
-                    Serial.println("[FSM] Tracking timeout -> finalizeEpisode()");
+                    LOGGER_DEBUG(Serial.println("[FSM] Tracking timeout -> finalizeEpisode()"));
                     if (finalizeEpisode(nowMs)) {
-                        Serial.println("[FSM] Tracking -> Cooldown (timeout)");
+                        LOGGER_DEBUG(Serial.println("[FSM] Tracking -> Cooldown (timeout)"));
                         state = State::Cooldown;
                         cooldownUntil = nowMs + COOLDOWN_MS;
                         return GestureEvent::EpisodeReady;
                     } else {
-                        Serial.println("[FSM] finalize FAIL -> Idle");
+                        LOGGER_DEBUG(Serial.println("[FSM] finalize FAIL -> Idle"));
                         reset();
                     }
                 }
             } else {
                 if (++exitCount >= EXIT_COUNT) {
-                    Serial.println("[FSM] Tracking exitCount reached -> finalizeEpisode()");
+                    LOGGER_DEBUG(Serial.println("[FSM] Tracking exitCount reached -> finalizeEpisode()"));
                     if (finalizeEpisode(nowMs)) {
-                        Serial.println("[FSM] Tracking -> Cooldown (hand left)");
+                        LOGGER_DEBUG(Serial.println("[FSM] Tracking -> Cooldown (hand left)"));
                         state = State::Cooldown;
                         cooldownUntil = nowMs + COOLDOWN_MS;
                         return GestureEvent::EpisodeReady;
                     } else {
-                        Serial.println("[FSM] finalize FAIL -> Idle");
+                        LOGGER_DEBUG(Serial.println("[FSM] finalize FAIL -> Idle"));
                         reset();
                     }
                 }
@@ -100,7 +114,7 @@ public:
 
         case State::Cooldown:
             if (!anyValid && nowMs >= cooldownUntil) {
-                Serial.println("[FSM] Cooldown -> Idle");
+                LOGGER_DEBUG(Serial.println("[FSM] Cooldown -> Idle"));
                 reset();
             }
             break;
@@ -190,9 +204,15 @@ private:
         return b;
     }
 
-    // prefer current valid reading over stale median
+    /**
+     * This function performs smoothening and filtering of raw data from the sensors. 
+     * It first checks if a value received is valid, if not it uses the median of the last
+     * three readings to replace it to keep the values reliable for inference. 
+     * 
+     * 
+     */
     void filterDistances(const uint16_t raw[3]) {
-        rawIdx = (rawIdx + 1) % 3;
+        rawIdx = (rawIdx + 1) % 3;//circular buffer index
 
         uint16_t m[3];
 
@@ -200,23 +220,22 @@ private:
         for (int i = 0; i < 3; ++i) {
             rawHist[i][rawIdx] = raw[i];
 
-            if (raw[i] != 0 && raw[i] != 0xFFFF) {
-                // Current reading is valid: trust it directly
+            if (raw[i] != 0 && raw[i] != 0xFFFF) {//valid reading
                 m[i] = raw[i];
-            } else {
-                // Current reading invalid: fall back to median of history
+            } else {//invalid reading, use median of history
                 m[i] = median3(rawHist[i][0], rawHist[i][1], rawHist[i][2]);
             }
         }
 
-        // Find the nearest valid m[i] in this frame
+        //find the closest valid reading aka closest object to the sensors such that the sensors are not 
+        // influenced by the background/noise when making a gesture. 
         uint16_t zMinFrame = 0xFFFF;
         for (int i = 0; i < 3; ++i) {
             if (m[i] == 0 || m[i] == 0xFFFF) continue; // invalid
             if (m[i] < zMinFrame) zMinFrame = m[i];
         }
 
-        // If no valid medians at all, treat everything as invalid and decay filters
+        // If no valid medians at all, treat everything as invalid and decay filters and reset
         if (zMinFrame == 0xFFFF) {
             for (int i = 0; i < 3; ++i) {
                 if (invalidCount[i] < 255) invalidCount[i]++;
@@ -227,9 +246,11 @@ private:
             return;
         }
 
-        // Now, for each sensor: only keep values in the global band AND within the near layer
+        // for each sensor only keep values in the global band determined above and within its area determined by near_layer_th_mm
+        // ignore everything else beyond the closest sensed threshold
         uint16_t zMaxAllowed = (uint16_t)(zMinFrame + NEAR_LAYER_TH_MM);
 
+        //validate each sensor reading and update EMA filter
         for (int i = 0; i < 3; ++i) {
             uint16_t mi = m[i];
 
@@ -321,18 +342,22 @@ private:
 bool finalizeEpisode(uint32_t nowMs) {
     ep.tEndMs = nowMs;
 
-    Serial.println("---- finalizeEpisode ----");
+    LOGGER_DEBUG(Serial.println("---- finalizeEpisode ----"));
 
     // sample count
     if (ep.sampleCount < 2) {
-        Serial.println("FAIL: sampleCount < 2");
+        Logger::log(Logger::Level::Warn,
+                    "Episode finalize failed: sampleCount < 2");
+        LOGGER_DEBUG(Serial.println("FAIL: sampleCount < 2"));
         return false;
     }
 
     // duration check (minimum only)
     uint32_t dur = ep.tEndMs - ep.tStartMs;
     if (dur < MIN_EPISODE_MS) {
-        Serial.println("FAIL: duration too short");
+        Logger::log(Logger::Level::Warn,
+                    "Episode finalize failed: duration too short");
+        LOGGER_DEBUG(Serial.println("FAIL: duration too short"));
         return false;
     }
 
@@ -352,12 +377,14 @@ bool finalizeEpisode(uint32_t nowMs) {
 
     // final decision
     if (maxSwing < MIN_SWING_MM && maxV < 200) {
-        Serial.println("FAIL: weak swing + weak velocity");
+        Logger::log(Logger::Level::Warn,
+                "Episode finalize failed: weak swing + weak velocity");
+        LOGGER_DEBUG(Serial.println("FAIL: weak swing + weak velocity"));
         return false;
     }
 
-    Serial.println("PASS: Episode finalized!");
-    Serial.println("------------------------");
+    LOGGER_DEBUG(Serial.println("PASS: Episode finalized!"));
+    LOGGER_DEBUG(Serial.println("------------------------"));
     return true;
 }
 

@@ -4,6 +4,8 @@
 #include <ESP_I2S.h>
 #include <string.h> // for memcmp
 
+#include <Logger.hpp>
+
 namespace Speaker {
 
   // ========= WAV header parsing =========
@@ -96,7 +98,9 @@ namespace Speaker {
                           I2S_SLOT_MODE_MONO);
     g_i2sInited = ok;
     if (!ok) {
-      Serial.println("Speaker::initMax98357A: i2s.begin failed");
+      Logger::log(Logger::Level::Error,
+                  "Speaker::initMax98357A: i2s.begin failed");
+      LOGGER_DEBUG(Serial.println("Speaker::initMax98357A: i2s.begin failed"));
     }
     return ok;
   }
@@ -108,7 +112,9 @@ namespace Speaker {
     if (!g_i2s.configureTX(rate,
                            I2S_DATA_BIT_WIDTH_16BIT,
                            I2S_SLOT_MODE_MONO)) {
-      Serial.println("Speaker::ensureSampleRate: configureTX failed");
+      Logger::log(Logger::Level::Error,
+                  "Speaker::ensureSampleRate: configureTX failed");
+      LOGGER_DEBUG(Serial.println("Speaker::ensureSampleRate: configureTX failed"));
       return false;
     }
     g_i2sRate = rate;
@@ -119,20 +125,27 @@ namespace Speaker {
 
   inline bool playWavI2S(const char *path) {
     if (!g_i2sInited) {
-      Serial.println("playWavI2S: I2S not initialized");
+      Logger::log(Logger::Level::Error, "playWavI2S: I2S not initialized");
+      LOGGER_DEBUG(Serial.println("playWavI2S: I2S not initialized"));
       return false;
     }
 
     File f = SD.open(path);
     if (!f) {
-      Serial.print("playWavI2S: failed to open ");
-      Serial.println(path);
+      Logger::logf(Logger::Level::Error,
+                   "playWavI2S: failed to open %s",
+                   path ? path : "<null>");
+      LOGGER_DEBUG(
+        Serial.print("playWavI2S: failed to open ");
+        Serial.println(path ? path : "<null>");
+      );
       return false;
     }
 
     WavInfo info;
     if (!parseWavHeader(f, info)) {
-      Serial.println("playWavI2S: invalid WAV header");
+      Logger::log(Logger::Level::Error, "playWavI2S: invalid WAV header");
+      LOGGER_DEBUG(Serial.println("playWavI2S: invalid WAV header"));
       f.close();
       return false;
     }
@@ -140,31 +153,43 @@ namespace Speaker {
     // Accept mono or stereo, 16-bit only
     if (info.bitsPerSample != 16 ||
         (info.numChannels != 1 && info.numChannels != 2)) {
-      Serial.print("playWavI2S: unsupported format (ch=");
-      Serial.print(info.numChannels);
-      Serial.print(", bits=");
-      Serial.print(info.bitsPerSample);
-      Serial.println(")");
+      Logger::logf(Logger::Level::Error,
+                   "playWavI2S: unsupported format (ch=%u, bits=%u)",
+                   info.numChannels,
+                   info.bitsPerSample);
+      LOGGER_DEBUG(
+        Serial.print("playWavI2S: unsupported format (ch=");
+        Serial.print(info.numChannels);
+        Serial.print(", bits=");
+        Serial.print(info.bitsPerSample);
+        Serial.println(")");
+      );
       f.close();
       return false;
     }
 
     if (!ensureSampleRate(info.sampleRate)) {
-      Serial.println("playWavI2S: failed to set sample rate");
+      Logger::log(Logger::Level::Error,
+                  "playWavI2S: failed to set sample rate");
+      LOGGER_DEBUG(Serial.println("playWavI2S: failed to set sample rate"));
       f.close();
       return false;
     }
 
     if (!f.seek(info.dataOffset)) {
-      Serial.println("playWavI2S: failed to seek to data");
+      Logger::log(Logger::Level::Error,
+                  "playWavI2S: failed to seek to data");
+      LOGGER_DEBUG(Serial.println("playWavI2S: failed to seek to data"));
       f.close();
       return false;
     }
 
-    Serial.print("playWavI2S: sampleRate=");
-    Serial.print(info.sampleRate);
-    Serial.print(" Hz, channels=");
-    Serial.println(info.numChannels);
+    LOGGER_DEBUG(
+      Serial.print("playWavI2S: sampleRate=");
+      Serial.print(info.sampleRate);
+      Serial.print(" Hz, channels=");
+      Serial.println(info.numChannels);
+    );
 
     const uint8_t  ch          = info.numChannels;
     const uint8_t  bytesPerSam = 2 * ch;
@@ -266,7 +291,7 @@ namespace Speaker {
   }
 
   static void audioTask(void* /*arg*/) {
-    Serial.println("Speaker::audioTask: started");
+    LOGGER_DEBUG(Serial.println("Speaker::audioTask: started"));
 
     for (;;) {
       if (g_stopRequested) break;
@@ -277,12 +302,17 @@ namespace Speaker {
       }
 
       const char* path = g_playlist[g_currentIndex];
-      Serial.print("Speaker::audioTask: opening ");
-      Serial.println(path);
+      LOGGER_DEBUG(
+        Serial.print("Speaker::audioTask: opening ");
+        Serial.println(path);
+      );
 
       File f = SD.open(path);
       if (!f) {
-        Serial.println("Speaker::audioTask: failed to open file, skipping");
+        Logger::logf(Logger::Level::Warn,
+                     "Speaker::audioTask: failed to open %s",
+                     path ? path : "<null>");
+        LOGGER_DEBUG(Serial.println("Speaker::audioTask: failed to open file, skipping"));
         g_currentIndex = (g_currentIndex + 1) % g_playlistCount;
         vTaskDelay(pdMS_TO_TICKS(50));
         continue;
@@ -290,7 +320,9 @@ namespace Speaker {
 
       WavInfo info;
       if (!parseWavHeader(f, info)) {
-        Serial.println("Speaker::audioTask: invalid WAV header, skipping");
+        Logger::log(Logger::Level::Warn,
+                    "Speaker::audioTask: invalid WAV header");
+        LOGGER_DEBUG(Serial.println("Speaker::audioTask: invalid WAV header, skipping"));
         f.close();
         g_currentIndex = (g_currentIndex + 1) % g_playlistCount;
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -299,11 +331,17 @@ namespace Speaker {
 
       if (info.bitsPerSample != 16 ||
           (info.numChannels != 1 && info.numChannels != 2)) {
-        Serial.print("Speaker::audioTask: unsupported format (ch=");
-        Serial.print(info.numChannels);
-        Serial.print(", bits=");
-        Serial.print(info.bitsPerSample);
-        Serial.println("), skipping");
+        Logger::logf(Logger::Level::Warn,
+                     "Speaker::audioTask: unsupported format (ch=%u, bits=%u)",
+                     info.numChannels,
+                     info.bitsPerSample);
+        LOGGER_DEBUG(
+          Serial.print("Speaker::audioTask: unsupported format (ch=");
+          Serial.print(info.numChannels);
+          Serial.print(", bits=");
+          Serial.print(info.bitsPerSample);
+          Serial.println("), skipping");
+        );
         f.close();
         g_currentIndex = (g_currentIndex + 1) % g_playlistCount;
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -311,7 +349,9 @@ namespace Speaker {
       }
 
       if (!ensureSampleRate(info.sampleRate)) {
-        Serial.println("Speaker::audioTask: failed to set sample rate, skipping");
+        Logger::log(Logger::Level::Warn,
+                    "Speaker::audioTask: failed to set sample rate");
+        LOGGER_DEBUG(Serial.println("Speaker::audioTask: failed to set sample rate, skipping"));
         f.close();
         g_currentIndex = (g_currentIndex + 1) % g_playlistCount;
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -319,17 +359,21 @@ namespace Speaker {
       }
 
       if (!f.seek(info.dataOffset)) {
-        Serial.println("Speaker::audioTask: seek to data failed, skipping");
+        Logger::log(Logger::Level::Warn,
+                    "Speaker::audioTask: seek to data failed");
+        LOGGER_DEBUG(Serial.println("Speaker::audioTask: seek to data failed, skipping"));
         f.close();
         g_currentIndex = (g_currentIndex + 1) % g_playlistCount;
         vTaskDelay(pdMS_TO_TICKS(50));
         continue;
       }
 
-      Serial.print("Speaker::audioTask: playing, rate=");
-      Serial.print(info.sampleRate);
-      Serial.print(" Hz, channels=");
-      Serial.println(info.numChannels);
+      LOGGER_DEBUG(
+        Serial.print("Speaker::audioTask: playing, rate=");
+        Serial.print(info.sampleRate);
+        Serial.print(" Hz, channels=");
+        Serial.println(info.numChannels);
+      );
 
       const uint8_t ch          = info.numChannels;
       const uint8_t bytesPerSam = 2 * ch;
@@ -354,13 +398,15 @@ namespace Speaker {
             g_volume += 0.1f * delta;
             if (g_volume < 0.0f) g_volume = 0.0f;
             if (g_volume > 2.0f) g_volume = 2.0f;
-            Serial.print("Speaker::volume=");
-            Serial.println(g_volume);
+            LOGGER_DEBUG(
+              Serial.print("Speaker::volume=");
+              Serial.println(g_volume);
+            );
           }
           if (g_cmdPauseToggle) {
             g_cmdPauseToggle = false;
             g_paused = false;
-            Serial.println("Speaker::unpause");
+            LOGGER_DEBUG(Serial.println("Speaker::unpause"));
           }
           if (g_cmdNext) {
             g_cmdNext = false;
@@ -384,7 +430,7 @@ namespace Speaker {
         if (g_cmdPauseToggle) {
           g_cmdPauseToggle = false;
           g_paused = !g_paused;
-          Serial.println(g_paused ? "Speaker::pause" : "Speaker::unpause");
+          LOGGER_DEBUG(Serial.println(g_paused ? "Speaker::pause" : "Speaker::unpause"));
           continue;
         }
         if (g_cmdNext) {
@@ -403,8 +449,10 @@ namespace Speaker {
           g_volume += 0.1f * delta;
           if (g_volume < 0.0f) g_volume = 0.0f;
           if (g_volume > 2.0f) g_volume = 2.0f;
-          Serial.print("Speaker::volume=");
-          Serial.println(g_volume);
+          LOGGER_DEBUG(
+            Serial.print("Speaker::volume=");
+            Serial.println(g_volume);
+          );
         }
 
         uint32_t bytesLeft = remaining;
@@ -462,18 +510,22 @@ namespace Speaker {
 
     }
 
-    Serial.println("Speaker::audioTask: exiting");
+    LOGGER_DEBUG(Serial.println("Speaker::audioTask: exiting"));
     g_audioTaskHandle = nullptr;
     vTaskDelete(nullptr);
   }
 
   inline void startPlayer() {
     if (!g_i2sInited || g_playlistCount == 0) {
-      Serial.println("Speaker::startPlayer: I2S not inited or playlist empty");
+      Logger::log(Logger::Level::Error,
+                  "Speaker::startPlayer: I2S not inited or playlist empty");
+      LOGGER_DEBUG(Serial.println("Speaker::startPlayer: I2S not inited or playlist empty"));
       return;
     }
     if (g_audioTaskHandle) {
-      Serial.println("Speaker::startPlayer: already running");
+      Logger::log(Logger::Level::Warn,
+                  "Speaker::startPlayer: already running");
+      LOGGER_DEBUG(Serial.println("Speaker::startPlayer: already running"));
       return;
     }
 
