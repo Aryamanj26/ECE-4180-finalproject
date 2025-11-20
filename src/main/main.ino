@@ -21,9 +21,9 @@
 
 #define SD_CS     9
 
-#define LED_G  1    // green  -> GPIO 1
-#define LED_B  13   // blue   -> GPIO 13
-#define LED_R  12   // red    -> GPIO 12
+#define LED_G  1
+#define LED_B  13
+#define LED_R  12
 #define BUTTON_PIN 21
 
 
@@ -47,7 +47,7 @@ volatile uint32_t g_lastButtonPressMs = 0;
 
 void IRAM_ATTR buttonISR() {
   uint32_t now = millis();
-  // Debounce: ignore if within 300ms of last press
+  // Debounce ignore if within 300ms of last press
   if (now - g_lastButtonPressMs < 300) {
     return;
   }
@@ -57,10 +57,10 @@ void IRAM_ATTR buttonISR() {
   g_systemEnabled = !g_systemEnabled;
 
   if (g_systemEnabled) {
-    // Resume: unpause speaker
+    // Resume speaker
     Speaker::pauseToggle();
   } else {
-    // Pause: pause speaker
+    // Pause speaker
     Speaker::pauseToggle();
   }
 }
