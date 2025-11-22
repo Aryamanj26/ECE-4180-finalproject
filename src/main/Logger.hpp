@@ -1,3 +1,12 @@
+/*
+ * System Logger and LED Status Indicator
+ * 
+ * Provides thread-safe logging to SD card with RGB LED status indication.
+ * Uses FreeRTOS semaphores to ensure safe concurrent access to the SD card.
+ * LED colors indicate system state: green (idle), blue (processing gesture),
+ * yellow (weak gesture), cyan (WiFi active), red (error).
+ */
+
 #pragma once
 #include <Arduino.h>
 #include <SD.h>
@@ -49,6 +58,10 @@ inline bool& initializedRef() {
 
 // -------- LED helpers --------
 
+/*
+ * Sets the RGB LED to a specific color combination
+ * Controls the three LED pins to create different status colors.
+ */
 inline void setLed(bool r, bool g, bool b) {
   int pinR = pinRRef();
   int pinG = pinGRef();
@@ -60,14 +73,20 @@ inline void setLed(bool r, bool g, bool b) {
   digitalWrite(pinB, b ? HIGH : LOW);
 }
 
-inline void ledIdle() { setLed(false, true,  false); } // green
-inline void ledBusy() { setLed(false, false, true ); } // blue
-inline void ledWarn() { setLed(true,  true,  false); } // yellow/orange
-inline void ledWifi() { setLed(false, true,  true ); } // cyan
-inline void ledError(){ setLed(true,  false, false); } // red
+// LED status indicator functions for different system states
+inline void ledIdle() { setLed(false, true,  false); } // green - system ready
+inline void ledBusy() { setLed(false, false, true ); } // blue - gesture recognized
+inline void ledWarn() { setLed(true,  true,  false); } // yellow - weak/unclear gesture
+inline void ledWifi() { setLed(false, true,  true ); } // cyan - WiFi active
+inline void ledError(){ setLed(true,  false, false); } // red - error or system disabled
 
 // -------- init --------
 
+/*
+ * Initializes the logger with SD card mutex and LED pins
+ * Sets up the RGB LED pins and writes a startup message to the log file.
+ * Must be called before using any logging functions.
+ */
 inline void init(SemaphoreHandle_t sdMutex,
                  const char* logPath,
                  int pinR, int pinG, int pinB)
@@ -103,6 +122,10 @@ inline void init(SemaphoreHandle_t sdMutex,
 
 // -------- low-level write helper --------
 
+/*
+ * Internal helper that writes a timestamped log line to the SD card
+ * Uses non-blocking semaphore acquisition to avoid interfering with audio playback.
+ */
 inline void writeLine(Level level, const char* line) {
   if (!initializedRef() || !line) return;
 
@@ -139,6 +162,10 @@ inline void writeLine(Level level, const char* line) {
 
 // -------- public logging API --------
 
+/*
+ * Logs a message with the specified severity level
+ * Messages are timestamped and written to the SD card log file.
+ */
 inline void log(Level level, const char* msg) {
   if (!initializedRef() || !msg) return;
 
@@ -149,6 +176,10 @@ inline void log(Level level, const char* msg) {
   writeLine(level, msg);
 }
 
+/*
+ * Logs a formatted message with the specified severity level
+ * Similar to printf - accepts format strings and variable arguments.
+ */
 inline void logf(Level level, const char* fmt, ...) {
   if (!initializedRef() || !fmt) return;
 

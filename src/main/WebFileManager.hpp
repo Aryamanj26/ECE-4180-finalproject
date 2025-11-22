@@ -1,3 +1,12 @@
+/*
+ * WiFi File Manager
+ * 
+ * Provides a web-based interface for managing files on the SD card.
+ * Creates a WiFi access point and hosts a simple web server that allows
+ * uploading, downloading, and deleting WAV files through a browser.
+ * Useful for updating the music library without removing the SD card.
+ */
+
 #pragma once
 #include <WiFi.h>
 #include <WebServer.h>
@@ -42,6 +51,10 @@ namespace WebFileManager {
 
   // -------- helpers --------
 
+  /*
+   * Converts a file size in bytes to a human-readable string
+   * Automatically selects appropriate units (B, KB, MB, GB).
+   */
   inline String humanSize(uint64_t bytes) {
     if (bytes < 1024) return String(bytes) + " B";
     double kb = bytes / 1024.0;
@@ -52,6 +65,10 @@ namespace WebFileManager {
     return String(gb, 1) + " GB";
   }
 
+  /*
+   * Generates an HTML table listing all files on the SD card
+   * Includes file names, sizes, and action buttons (download/delete) for each file.
+   */
   inline String makeFileTable() {
     String html;
 
@@ -111,6 +128,10 @@ namespace WebFileManager {
 
   // -------- HTTP handlers --------
 
+  /*
+   * Serves the main file manager page
+   * Displays the upload form and lists all files currently on the SD card.
+   */
   inline void handleRoot() {
     String page;
     page += "<html><head><title>ESP32 SD File Manager</title></head><body>";
@@ -135,6 +156,10 @@ namespace WebFileManager {
     server().send(200, "text/html", page);
   }
 
+  /*
+   * Handles file uploads from the web interface
+   * Receives file data in chunks and writes it to the SD card.
+   */
   inline void handleUpload() {
     HTTPUpload& upload = server().upload();
     File& uploadFile = uploadFileRef();
@@ -177,6 +202,10 @@ namespace WebFileManager {
     }
   }
 
+  /*
+   * Handles file deletion requests from the web interface
+   * Removes the specified file from the SD card and redirects back to the main page.
+   */
   inline void handleDelete() {
     if (!server().hasArg("name")) {
       server().send(400, "text/plain", "Missing 'name' parameter");
@@ -207,6 +236,10 @@ namespace WebFileManager {
     server().send(303);
   }
 
+  /*
+   * Handles file download requests from the web interface
+   * Streams the requested file from SD card to the client browser.
+   */
   inline void handleDownload() {
     if (!server().hasArg("name")) {
       server().send(400, "text/plain", "Missing 'name' parameter");
@@ -245,6 +278,11 @@ namespace WebFileManager {
 
   // -------- public API for your main code --------
 
+  /*
+   * Initializes and starts the WiFi file manager web server
+   * Creates a WiFi access point and sets up HTTP request handlers.
+   * Connect to the specified SSID and navigate to http://192.168.4.1/
+   */
   inline void begin(SemaphoreHandle_t sdMutex,
                     const char* ssid = "ESP32-Music",
                     const char* password = "12345678")
@@ -278,10 +316,18 @@ namespace WebFileManager {
     server().begin();
   }
 
+  /*
+   * Processes incoming web requests (call regularly from main loop)
+   * Checks for and handles any pending HTTP requests from clients.
+   */
   inline void loopOnce() {
     server().handleClient();
   }
 
+  /*
+   * Shuts down the web server and disables WiFi
+   * Call this when the file manager is no longer needed.
+   */
   inline void stop() {
     server().stop();
     WiFi.mode(WIFI_OFF);

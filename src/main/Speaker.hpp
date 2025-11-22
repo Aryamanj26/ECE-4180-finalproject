@@ -1,8 +1,17 @@
+/*
+ * Audio Playback System
+ * 
+ * Handles WAV file playback through I2S to a MAX98357A amplifier.
+ * Manages a playlist with controls for play/pause, track navigation, and volume adjustment.
+ * Runs audio playback in a dedicated FreeRTOS task to avoid blocking gesture recognition.
+ * Supports mono and stereo WAV files with automatic format conversion.
+ */
+
 #pragma once
 #include <Arduino.h>
 #include <SD.h>
 #include <ESP_I2S.h>
-#include <string.h> // for memcmp
+#include <string.h>
 
 #include <Logger.hpp>
 
@@ -10,6 +19,10 @@ namespace Speaker {
 
   // ========= WAV header parsing =========
 
+  /*
+   * Stores parsed WAV file audio format information
+   * Contains sample rate, channel count, and data location within the file.
+   */
   struct WavInfo {
     uint32_t sampleRate    = 0;
     uint16_t numChannels   = 0;
@@ -18,6 +31,11 @@ namespace Speaker {
     uint32_t dataSize      = 0;
   };
 
+  /*
+   * Parses the header of a WAV file to extract audio format information
+   * Validates the file format and locates the audio data chunk.
+   * Only supports PCM WAV files (the most common uncompressed format).
+   */
   inline bool parseWavHeader(File &f, WavInfo &info) {
     if (!f) return false;
 
@@ -87,6 +105,11 @@ namespace Speaker {
   static bool     g_i2sInited = false;
   static uint32_t g_i2sRate   = 44100;
 
+  /*
+   * Initializes the I2S audio interface connected to MAX98357A amplifier
+   * Configures the I2S pins and sets the default sample rate.
+   * Must be called before any audio playback can occur.
+   */
   inline bool initMax98357A(int bclkPin, int lrckPin, int dataPin,
                             uint32_t defaultRate = 44100) {
     g_i2sRate = defaultRate;
@@ -105,6 +128,10 @@ namespace Speaker {
     return ok;
   }
 
+  /*
+   * Adjusts the I2S sample rate if needed for the current audio file
+   * Only reconfigures if the rate differs from the current setting.
+   */
   inline bool ensureSampleRate(uint32_t rate) {
     if (!g_i2sInited) return false;
     if (rate == 0 || rate == g_i2sRate) return true;
@@ -123,6 +150,11 @@ namespace Speaker {
 
   // ========= Simple blocking one-shot player (good for tests) =========
 
+  /*
+   * Plays a complete WAV file from start to finish (blocking)
+   * Reads the file from SD card, converts to mono if needed, and streams to I2S.
+   * This function blocks until playback completes - use the background player for normal operation.
+   */
   inline bool playWavI2S(const char *path) {
     if (!g_i2sInited) {
       Logger::log(Logger::Level::Error, "playWavI2S: I2S not initialized");
@@ -275,21 +307,42 @@ namespace Speaker {
   }
 
   // Control API – call these from your gesture code
+  
+  /* Skips to the next track in the playlist */
   inline void nextTrack()       { g_cmdNext        = true; }
+  
+  /* Returns to the previous track in the playlist */
   inline void prevTrack()       { g_cmdPrev        = true; }
+  
+  /* Toggles between play and pause states */
   inline void pauseToggle()     { g_cmdPauseToggle = true; }
+  
+  /* Stops playback and terminates the audio task */
   inline void stopPlayback()    { g_stopRequested  = true; }
+  
+  /* Increases the volume by one step */
   inline void volumeUp()        { g_cmdVolDelta++; }
+  
+  /* Decreases the volume by one step */
   inline void volumeDown()      { g_cmdVolDelta--; }
 
   // ==== internal helpers / task ====
 
+  /*
+   * Clamps a 32-bit value to 16-bit signed range
+   * Prevents audio clipping when applying volume scaling.
+   */
   inline int16_t clamp16(int32_t x) {
     if (x > 32767) return 32767;
     if (x < -32768) return -32768;
     return (int16_t)x;
   }
 
+  /*
+   * FreeRTOS task that manages continuous audio playback
+   * Handles the playlist, processes control commands, applies volume scaling,
+   * and streams audio data to the I2S interface. Runs in background.
+   */
   static void audioTask(void* /*arg*/) {
     LOGGER_DEBUG(Serial.println("Speaker::audioTask: started"));
 
@@ -515,6 +568,11 @@ namespace Speaker {
     vTaskDelete(nullptr);
   }
 
+  /*
+   * Starts the background audio playback task
+   * Creates a FreeRTOS task that continuously plays through the playlist.
+   * Must be called after setting the playlist and initializing I2S.
+   */
   inline void startPlayer() {
     if (!g_i2sInited || g_playlistCount == 0) {
       Logger::log(Logger::Level::Error,

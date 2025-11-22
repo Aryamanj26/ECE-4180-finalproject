@@ -1,8 +1,21 @@
+/*
+ * Gesture Preprocessor
+ * 
+ * Handles raw sensor data filtering, noise reduction, and gesture episode detection.
+ * Implements a finite state machine to track when a hand enters and leaves the sensor field,
+ * recording timing and motion characteristics needed for gesture classification.
+ */
+
 #pragma once
 #include <Arduino.h>
 #include <GestureTypes.hpp>
 #include <Logger.hpp>
 
+/*
+ * Stores all relevant data about a detected gesture episode
+ * Captures timing, distance ranges, and velocity information from all three sensors
+ * to enable accurate gesture classification.
+ */
 struct GestureEpisode {
     uint32_t tStartMs = 0;
     uint32_t tEndMs   = 0;
@@ -25,105 +38,101 @@ class GesturePreprocessor {
 public:
     GesturePreprocessor() { reset(); }
 
-    /**
-     *  WHat this function does is:
-     *  1) take raw distance readings from the three sensors,
-     *  2) process them through filtering and gating, and update the internal FSM state.
-     * 
-     *  Data processing includes:
-     * - smoothing/filtering of raw distance readings using ema filter. low pass smoothing goal.
-     * - nearest-depth gating
-     * - validation of data.
-     * 
-     * 3) 
+    /*
+     * Processes raw sensor readings and updates the gesture detection state machine
+     * Takes distance readings from three sensors, applies filtering and validation,
+     * then determines if a gesture episode is starting, ongoing, or complete.
+     * Returns EpisodeReady when a gesture has been captured and is ready for classification.
      */
     GestureEvent update(uint16_t d0, uint16_t d1, uint16_t d2, uint32_t nowMs) {
-    uint16_t raw[3] = { d0, d1, d2 };
-    filterDistances(raw);
+        uint16_t raw[3] = { d0, d1, d2 };
+        filterDistances(raw);
 
-    // Per-frame nearest-depth gating
-    uint16_t zMinFrame = 0xFFFF;
-    for (int i = 0; i < 3; ++i) {
-        if (inBand(filt[i]) && filt[i] < zMinFrame) {
-            zMinFrame = filt[i];
-        }
-    }
-
-    bool valid[3] = { false, false, false };
-    if (zMinFrame != 0xFFFF) {
-        uint16_t zMaxAllowed = (uint16_t)(zMinFrame + NEAR_LAYER_TH_MM);
+        uint16_t zMinFrame = 0xFFFF;
         for (int i = 0; i < 3; ++i) {
-            if (inBand(filt[i]) && filt[i] <= zMaxAllowed) {
-                valid[i] = true;
+            if (inBand(filt[i]) && filt[i] < zMinFrame) {
+                zMinFrame = filt[i];
             }
         }
-    }
 
-    bool anyValid = valid[0] || valid[1] || valid[2];
+        bool valid[3] = { false, false, false };
+        if (zMinFrame != 0xFFFF) {
+            uint16_t zMaxAllowed = (uint16_t)(zMinFrame + NEAR_LAYER_TH_MM);
+            for (int i = 0; i < 3; ++i) {
+                if (inBand(filt[i]) && filt[i] <= zMaxAllowed) {
+                    valid[i] = true;
+                }
+            }
+        }
 
-    switch (state) {
-        case State::Idle:
-            Logger::ledIdle();
-            if (anyValid) {
-                if (++enterCount >= ENTER_COUNT) {
-                    LOGGER_DEBUG(Serial.println("[FSM] Idle -> Tracking"));
-                    startEpisode(nowMs);
-                    appendSample(valid, nowMs);
-                    state = State::Tracking;
+        bool anyValid = valid[0] || valid[1] || valid[2];[2];
+
+        switch (state) {
+            case State::Idle:
+                Logger::ledIdle();
+                if (anyValid) {
+                    if (++enterCount >= ENTER_COUNT) {
+                        LOGGER_DEBUG(Serial.println("[FSM] Idle -> Tracking"));
+                        startEpisode(nowMs);
+                        appendSample(valid, nowMs);
+                        state = State::Tracking;
+                        enterCount = 0;
+                    }
+                } else {
                     enterCount = 0;
                 }
-            } else {
-                enterCount = 0;
-            }
-            exitCount = 0;
-            break;
-
-        case State::Tracking:
-            if (anyValid) {
                 exitCount = 0;
-                appendSample(valid, nowMs);
+                break;eak;
 
-                // time-based ending
-                if (nowMs - ep.tStartMs > MAX_EPISODE_MS) {
-                    LOGGER_DEBUG(Serial.println("[FSM] Tracking timeout -> finalizeEpisode()"));
-                    if (finalizeEpisode(nowMs)) {
-                        LOGGER_DEBUG(Serial.println("[FSM] Tracking -> Cooldown (timeout)"));
-                        state = State::Cooldown;
-                        cooldownUntil = nowMs + COOLDOWN_MS;
-                        return GestureEvent::EpisodeReady;
-                    } else {
-                        LOGGER_DEBUG(Serial.println("[FSM] finalize FAIL -> Idle"));
-                        reset();
+            case State::Tracking:
+                if (anyValid) {
+                    exitCount = 0;
+                    appendSample(valid, nowMs);
+
+                    if (nowMs - ep.tStartMs > MAX_EPISODE_MS) {
+                        LOGGER_DEBUG(Serial.println("[FSM] Tracking timeout -> finalizeEpisode()"));
+                        if (finalizeEpisode(nowMs)) {
+                            LOGGER_DEBUG(Serial.println("[FSM] Tracking -> Cooldown (timeout)"));
+                            state = State::Cooldown;
+                            cooldownUntil = nowMs + COOLDOWN_MS;
+                            return GestureEvent::EpisodeReady;
+                        } else {
+                            LOGGER_DEBUG(Serial.println("[FSM] finalize FAIL -> Idle"));
+                            reset();
+                        }
+                    }
+                } else {
+                    if (++exitCount >= EXIT_COUNT) {
+                        LOGGER_DEBUG(Serial.println("[FSM] Tracking exitCount reached -> finalizeEpisode()"));
+                        if (finalizeEpisode(nowMs)) {
+                            LOGGER_DEBUG(Serial.println("[FSM] Tracking -> Cooldown (hand left)"));
+                            state = State::Cooldown;
+                            cooldownUntil = nowMs + COOLDOWN_MS;
+                            return GestureEvent::EpisodeReady;
+                        } else {
+                            LOGGER_DEBUG(Serial.println("[FSM] finalize FAIL -> Idle"));
+                            reset();
+                        }
                     }
                 }
-            } else {
-                if (++exitCount >= EXIT_COUNT) {
-                    LOGGER_DEBUG(Serial.println("[FSM] Tracking exitCount reached -> finalizeEpisode()"));
-                    if (finalizeEpisode(nowMs)) {
-                        LOGGER_DEBUG(Serial.println("[FSM] Tracking -> Cooldown (hand left)"));
-                        state = State::Cooldown;
-                        cooldownUntil = nowMs + COOLDOWN_MS;
-                        return GestureEvent::EpisodeReady;
-                    } else {
-                        LOGGER_DEBUG(Serial.println("[FSM] finalize FAIL -> Idle"));
-                        reset();
-                    }
-                }
-            }
-            break;
+                break;
 
-        case State::Cooldown:
-            if (!anyValid && nowMs >= cooldownUntil) {
-                LOGGER_DEBUG(Serial.println("[FSM] Cooldown -> Idle"));
-                reset();
-            }
-            break;
+            case State::Cooldown:
+                if (!anyValid && nowMs >= cooldownUntil) {
+                    LOGGER_DEBUG(Serial.println("[FSM] Cooldown -> Idle"));
+                    reset();
+                }
+                break;
+        }
+
+        return GestureEvent::None;
     }
 
-    return GestureEvent::None;
-}
 
-
+    /*
+     * Returns the most recently completed gesture episode
+     * Used after receiving EpisodeReady event to get the data for classification.
+     */
     const GestureEpisode &lastEpisode() const { return ep; }
 
 private:
@@ -204,15 +213,14 @@ private:
         return b;
     }
 
-    /**
-     * This function performs smoothening and filtering of raw data from the sensors. 
-     * It first checks if a value received is valid, if not it uses the median of the last
-     * three readings to replace it to keep the values reliable for inference. 
-     * 
-     * 
+    /*
+     * Filters and validates raw sensor distance readings
+     * Uses a circular buffer and median filtering to handle invalid readings,
+     * then applies nearest-layer gating and exponential moving average to reduce noise.
+     * This ensures only valid, foreground objects are tracked for gesture detection.
      */
     void filterDistances(const uint16_t raw[3]) {
-        rawIdx = (rawIdx + 1) % 3;//circular buffer index
+        rawIdx = (rawIdx + 1) % 3;
 
         uint16_t m[3];
 
@@ -250,35 +258,33 @@ private:
         // ignore everything else beyond the closest sensed threshold
         uint16_t zMaxAllowed = (uint16_t)(zMinFrame + NEAR_LAYER_TH_MM);
 
-        //validate each sensor reading and update EMA filter
         for (int i = 0; i < 3; ++i) {
             uint16_t mi = m[i];
-
-            bool thisValid =
-                (mi != 0 && mi != 0xFFFF) &&
-                (mi >= D_MIN_MM && mi <= D_MAX_MM) &&
-                (mi <= zMaxAllowed);
+            bool thisValid = (mi != 0 && mi != 0xFFFF) &&
+                             (mi >= D_MIN_MM && mi <= D_MAX_MM) &&
+                             (mi <= zMaxAllowed);
 
             if (!thisValid) {
                 if (invalidCount[i] < 255) invalidCount[i]++;
                 if (invalidCount[i] >= INVALID_RESET_COUNT) {
-                    filt[i] = 0;              // no valid near-layer target -> clear
+                    filt[i] = 0;
                 }
                 continue;
             }
 
-            // valid near-layer reading -> reset invalid counter and update EMA
             invalidCount[i] = 0;
-
             if (filt[i] == 0) {
                 filt[i] = mi;
             } else {
-                // EMA with alpha = 1/4
                 filt[i] = (uint16_t)((3u * filt[i] + mi) / 4u);
             }
         }
     }
 
+    /*
+     * Initializes a new gesture episode when hand enters sensor field
+     * Resets all tracking variables to prepare for recording the new gesture.
+     */
     void startEpisode(uint32_t nowMs) {
         ep.tStartMs = nowMs;
         ep.sampleCount   = 0;
@@ -293,6 +299,11 @@ private:
         lastWinner = -1;
     }
 
+    /*
+     * Adds a new sensor reading sample to the current gesture episode
+     * Records timing, velocity, and distance information for each active sensor
+     * to build up a complete picture of the hand movement.
+     */
     void appendSample(const bool valid[3], uint32_t nowMs) {
         ep.sampleCount++;
 
@@ -339,54 +350,51 @@ private:
         }
     }
 
-bool finalizeEpisode(uint32_t nowMs) {
-    ep.tEndMs = nowMs;
+    /*
+     * Validates and completes a gesture episode
+     * Checks if the recorded data meets minimum requirements for a valid gesture
+     * (sufficient duration, movement magnitude, or velocity).
+     */
+    bool finalizeEpisode(uint32_t nowMs) {s) {
+        ep.tEndMs = nowMs;
 
-    LOGGER_DEBUG(Serial.println("---- finalizeEpisode ----"));
+        LOGGER_DEBUG(Serial.println("---- finalizeEpisode ----"));
 
-    // sample count
-    if (ep.sampleCount < 2) {
-        Logger::log(Logger::Level::Warn,
-                    "Episode finalize failed: sampleCount < 2");
-        LOGGER_DEBUG(Serial.println("FAIL: sampleCount < 2"));
-        return false;
-    }
-
-    // duration check (minimum only)
-    uint32_t dur = ep.tEndMs - ep.tStartMs;
-    if (dur < MIN_EPISODE_MS) {
-        Logger::log(Logger::Level::Warn,
-                    "Episode finalize failed: duration too short");
-        LOGGER_DEBUG(Serial.println("FAIL: duration too short"));
-        return false;
-    }
-
-    // compute swings
-    uint16_t maxSwing = 0;
-    for (int i = 0; i < 3; ++i) {
-        if (ep.dMin[i] != 0xFFFF) {
-            uint16_t swing = ep.dMax[i] - ep.dMin[i];
-            if (swing > maxSwing) maxSwing = swing;
+        if (ep.sampleCount < 2) {
+            Logger::log(Logger::Level::Warn, "Episode finalize failed: sampleCount < 2");
+            LOGGER_DEBUG(Serial.println("FAIL: sampleCount < 2"));
+            return false;
         }
+
+        uint32_t dur = ep.tEndMs - ep.tStartMs;
+        if (dur < MIN_EPISODE_MS) {
+            Logger::log(Logger::Level::Warn, "Episode finalize failed: duration too short");
+            LOGGER_DEBUG(Serial.println("FAIL: duration too short"));
+            return false;
+        }
+
+        uint16_t maxSwing = 0;
+        for (int i = 0; i < 3; ++i) {
+            if (ep.dMin[i] != 0xFFFF) {
+                uint16_t swing = ep.dMax[i] - ep.dMin[i];
+                if (swing > maxSwing) maxSwing = swing;
+            }
+        }
+
+        int16_t maxV = ep.maxApproachVel[0];
+        if (ep.maxApproachVel[1] > maxV) maxV = ep.maxApproachVel[1];
+        if (ep.maxApproachVel[2] > maxV) maxV = ep.maxApproachVel[2];
+
+        if (maxSwing < MIN_SWING_MM && maxV < 200) {
+            Logger::log(Logger::Level::Warn, "Episode finalize failed: weak swing + weak velocity");
+            LOGGER_DEBUG(Serial.println("FAIL: weak swing + weak velocity"));
+            return false;
+        }
+
+        LOGGER_DEBUG(Serial.println("PASS: Episode finalized!"));
+        LOGGER_DEBUG(Serial.println("------------------------"));
+        return true;
     }
-
-    // compute max velocity
-    int16_t maxV = ep.maxApproachVel[0];
-    if (ep.maxApproachVel[1] > maxV) maxV = ep.maxApproachVel[1];
-    if (ep.maxApproachVel[2] > maxV) maxV = ep.maxApproachVel[2];
-
-    // final decision
-    if (maxSwing < MIN_SWING_MM && maxV < 200) {
-        Logger::log(Logger::Level::Warn,
-                "Episode finalize failed: weak swing + weak velocity");
-        LOGGER_DEBUG(Serial.println("FAIL: weak swing + weak velocity"));
-        return false;
-    }
-
-    LOGGER_DEBUG(Serial.println("PASS: Episode finalized!"));
-    LOGGER_DEBUG(Serial.println("------------------------"));
-    return true;
-}
 
 
 };

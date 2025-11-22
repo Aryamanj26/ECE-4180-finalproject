@@ -1,10 +1,23 @@
+/*
+ * Gesture Classifier
+ * 
+ * Analyzes preprocessed gesture episodes to classify hand movements as specific gestures.
+ * Uses timing information and sensor activation patterns to distinguish between
+ * left/right swipes, up/down swipes, and tap gestures. The classifier looks at which
+ * sensors were triggered first and the velocity of the hand movement.
+ */
+
 #pragma once
 #include <Arduino.h>
 #include "GestureTypes.hpp"
-#include "GesturePreprocessor.hpp"  // for full GestureEpisode
+#include "GesturePreprocessor.hpp"
 
+/*
+ * Classifies a gesture episode into a recognized direction
+ * Analyzes sensor timing, swing magnitude, and velocity to determine the gesture type.
+ * Returns the classified gesture direction or None if no clear gesture is detected.
+ */
 GestureDir classifyEpisode(const GestureEpisode& ep) {
-    // sensor indices: 0 = Left, 1 = Right, 2 = Top
     auto swingOf = [&](int i)->uint16_t {
         if (ep.dMin[i] == 0xFFFF) return 0;
         return ep.dMax[i] - ep.dMin[i];
@@ -20,43 +33,41 @@ GestureDir classifyEpisode(const GestureEpisode& ep) {
 
     uint32_t dur = ep.tEndMs - ep.tStartMs;
 
-    // max velocity over all sensors
     int16_t maxV = ep.maxApproachVel[0];
     if (ep.maxApproachVel[1] > maxV) maxV = ep.maxApproachVel[1];
     if (ep.maxApproachVel[2] > maxV) maxV = ep.maxApproachVel[2];
 
-    // ---------- TAP ----------
-    // Your palm taps show:
-    //  - large swing on L/R (40–65mm)
-    //  - maxV around 140–170 mm/s
-    // We can say: "big swing on both L and R" + "velocity above ~130" = Tap.
+    // Detect TAP gesture
+    // A tap shows large simultaneous movement on both left and right sensors
+    // with significant approach velocity, indicating a quick hand motion toward sensors
     if (activeL && activeR) {
         if (swingL > 20 && swingR > 20 && maxV >= 60) {
             return GestureDir::Tap;
         }
     }
 
-    // ---------- LEFT/RIGHT swipes ----------
-    // Use firstSeen times on L and R.
-    const uint32_t GAP_MIN = 5;   // ms, tune if needed
-    const uint32_t GAP_MAX = 1500;  // ms, upper bound to avoid weird slow stuff
+    // Detect LEFT/RIGHT swipe gestures
+    // A horizontal swipe is detected by checking which sensor (left or right) sees
+    // the hand first, with a time gap between activations indicating direction
+    const uint32_t GAP_MIN = 5;
+    const uint32_t GAP_MAX = 1500;
 
     uint32_t tL = ep.firstSeenMs[0];
     uint32_t tR = ep.firstSeenMs[1];
 
     if (activeL && activeR && tL && tR && (swingL > 5 || swingR > 5) && !activeT) {
         if (tR > tL && (tR - tL) >= GAP_MIN && (tR - tL) <= GAP_MAX) {
-            // Left first then Right -> swipe towards Right
             return GestureDir::Right;
         }
         if (tL > tR && (tL - tR) >= GAP_MIN && (tL - tR) <= GAP_MAX) {
-            // Right first then Left -> swipe towards Left
             return GestureDir::Left;
         }
     }
 
-    // ---------- UP/DOWN swipes ----------
-    // bottom = min(firstSeen(L), firstSeen(R))
+    // Detect UP/DOWN swipe gestures
+    // Vertical swipes are detected by comparing when the bottom sensors (left/right)
+    // versus the top sensor first detect the hand. The timing difference indicates
+    // whether the hand moved upward or downward through the sensor field
     uint32_t tBottom = 0;
     if (activeL && ep.firstSeenMs[0]) tBottom = ep.firstSeenMs[0];
     if (activeR && ep.firstSeenMs[1]) {
@@ -67,11 +78,9 @@ GestureDir classifyEpisode(const GestureEpisode& ep) {
 
     if (tBottom && tTop && (swingL > 5 || swingR > 5 || swingT > 5)) {
         if (tTop > tBottom && (tTop - tBottom) >= GAP_MIN && (tTop - tBottom) <= GAP_MAX) {
-            // bottom first then top
             return GestureDir::Up;
         }
         if (tBottom > tTop && (tBottom - tTop) >= GAP_MIN && (tBottom - tTop) <= GAP_MAX) {
-            // top first then bottom
             return GestureDir::Down;
         }
     }

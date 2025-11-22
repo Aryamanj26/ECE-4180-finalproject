@@ -1,3 +1,12 @@
+/*
+ * Main Arduino sketch for gesture-controlled music player
+ * 
+ * This system uses three VL53L0X Time-of-Flight sensors arranged in a triangle
+ * to detect hand gestures (left, right, up, down, tap) for controlling music playback.
+ * Gestures trigger actions like volume control, track navigation, and play/pause.
+ * Audio playback is handled via I2S to a MAX98357A amplifier with WAV files from SD card.
+ */
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
@@ -45,26 +54,32 @@ const size_t kNumTracks = sizeof(kTracks) / sizeof(kTracks[0]);
 
 volatile uint32_t g_lastButtonPressMs = 0;
 
+/*
+ * Interrupt service routine for the physical button press
+ * Toggles the system between enabled and disabled states with debouncing.
+ * When disabled, gesture recognition pauses and audio playback is paused.
+ */
 void IRAM_ATTR buttonISR() {
   uint32_t now = millis();
-  // Debounce ignore if within 300ms of last press
   if (now - g_lastButtonPressMs < 300) {
     return;
   }
   g_lastButtonPressMs = now;
 
-  // Toggle system state
   g_systemEnabled = !g_systemEnabled;
 
   if (g_systemEnabled) {
-    // Resume speaker
     Speaker::pauseToggle();
   } else {
-    // Pause speaker
     Speaker::pauseToggle();
   }
 }
 
+/*
+ * Initializes a VL53L0X Time-of-Flight sensor with a specific I2C address
+ * Uses the XSHUT pin to power cycle the sensor before setting its new address.
+ * This allows multiple sensors on the same I2C bus with unique addresses.
+ */
 bool initSensor(Adafruit_VL53L0X &sensor, int xshutPin, uint8_t newAddr) {
   pinMode(xshutPin, OUTPUT);
   digitalWrite(xshutPin, LOW);
@@ -84,6 +99,11 @@ bool initSensor(Adafruit_VL53L0X &sensor, int xshutPin, uint8_t newAddr) {
   return true;
 }
 
+/*
+ * Reads distance measurement from a VL53L0X sensor
+ * Returns the distance in millimeters, or 0xFFFF if the reading is invalid
+ * (e.g., out of range or sensor error).
+ */
 uint16_t readVL(Adafruit_VL53L0X &s) {
   VL53L0X_RangingMeasurementData_t measure;
   s.rangingTest(&measure, false);
@@ -93,10 +113,14 @@ uint16_t readVL(Adafruit_VL53L0X &s) {
   return 0xFFFF;
 }
 
+/*
+ * FreeRTOS task that continuously reads sensor data and processes gestures
+ * Runs at approximately 50 Hz to capture hand movements. When a gesture episode
+ * is detected and classified, it triggers the corresponding music control action.
+ */
 void gestureTask(void* arg) {
   for (;;) {
     if (!g_systemEnabled) {
-      // System disabled - show red LED and skip gesture processing
       Logger::ledError();
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
@@ -181,10 +205,14 @@ void gestureTask(void* arg) {
       }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(20));  // ~50 Hz sensing
+    vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
 
+/*
+ * Arduino setup function - initializes all hardware and starts tasks
+ * Sets up sensors, SD card, audio output, WiFi file manager, and gesture recognition.
+ */
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -241,6 +269,10 @@ void setup() {
   );
 }
 
+/*
+ * Arduino main loop - runs indefinitely
+ * All work is done in FreeRTOS tasks, so this just sleeps forever.
+ */
 void loop() {
   vTaskDelay(portMAX_DELAY);
 }
