@@ -392,7 +392,6 @@ private:
         }
 
         LOGGER_DEBUG(Serial.println("PASS: Episode finalized!"));
-        LOGGER_DEBUG(Serial.println("------------------------"));
         return true;
     }
 

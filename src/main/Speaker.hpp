@@ -5,7 +5,10 @@
  * Manages a playlist with controls for play/pause, track navigation, and volume adjustment.
  * Runs audio playback in a dedicated FreeRTOS task to avoid blocking gesture recognition.
  * Supports mono and stereo WAV files with automatic format conversion.
- */
+ * 
+ * WAV file parsing and I2S audio streaming code adapted from standard WAV format specifications
+ * and ESP32 I2S library examples.
+ * */
 
 #pragma once
 #include <Arduino.h>
@@ -17,334 +20,249 @@
 
 namespace Speaker {
 
-  // ========= WAV header parsing =========
+// WAV header parsing
+// Based on standard RIFF/WAV file format specification
+struct WavInfo {
+	uint32_t sampleRate = 0;
+	uint16_t numChannels = 0;
+	uint16_t bitsPerSample = 0;
+	uint32_t dataOffset = 0;
+	uint32_t dataSize = 0;
+};
 
-  /*
-   * Stores parsed WAV file audio format information
-   * Contains sample rate, channel count, and data location within the file.
-   */
-  struct WavInfo {
-    uint32_t sampleRate    = 0;
-    uint16_t numChannels   = 0;
-    uint16_t bitsPerSample = 0;
-    uint32_t dataOffset    = 0;
-    uint32_t dataSize      = 0;
-  };
+// Parses WAV file header to extract audio format information
+// Only supports PCM WAV files.
+// Reference: http://soundfile.sapp.org/doc/WaveFormat/
+inline bool parseWavHeader(File &f, WavInfo &info) {
+	if (!f) return false;
 
-  /*
-   * Parses the header of a WAV file to extract audio format information
-   * Validates the file format and locates the audio data chunk.
-   * Only supports PCM WAV files (the most common uncompressed format).
-   */
-  inline bool parseWavHeader(File &f, WavInfo &info) {
-    if (!f) return false;
+	f.seek(0);
+	uint8_t header[44];
+	if (f.read(header, sizeof(header)) != sizeof(header)) return false;
 
-    f.seek(0);
-    uint8_t header[44];
-    if (f.read(header, sizeof(header)) != sizeof(header)) return false;
+	// Validate RIFF/WAVE format
+	if (memcmp(header + 0, "RIFF", 4) != 0) return false;
+	if (memcmp(header + 8, "WAVE", 4) != 0) return false;
+	if (memcmp(header + 12, "fmt ", 4) != 0) return false;
 
-    if (memcmp(header + 0, "RIFF", 4) != 0) return false;
-    if (memcmp(header + 8, "WAVE", 4) != 0) return false;
-    if (memcmp(header + 12, "fmt ", 4) != 0) return false;
+	// Read format chunk
+	uint32_t fmtChunkSize = (uint32_t)header[16] |
+		((uint32_t)header[17] << 8) |
+		((uint32_t)header[18] << 16) |
+		((uint32_t)header[19] << 24);
 
-    uint32_t fmtChunkSize =
-      (uint32_t)header[16] |
-      ((uint32_t)header[17] << 8) |
-      ((uint32_t)header[18] << 16) |
-      ((uint32_t)header[19] << 24);
+	uint16_t audioFormat = (uint16_t)header[20] | ((uint16_t)header[21] << 8);
+	uint16_t numChannels = (uint16_t)header[22] | ((uint16_t)header[23] << 8);
+	uint32_t sampleRate = (uint32_t)header[24] |
+		((uint32_t)header[25] << 8) |
+		((uint32_t)header[26] << 16) |
+		((uint32_t)header[27] << 24);
+	uint16_t bitsPerSample = (uint16_t)header[34] | ((uint16_t)header[35] << 8);
 
-    uint16_t audioFormat =
-      (uint16_t)header[20] |
-      ((uint16_t)header[21] << 8);
-    uint16_t numChannels =
-      (uint16_t)header[22] |
-      ((uint16_t)header[23] << 8);
-    uint32_t sampleRate =
-      (uint32_t)header[24] |
-      ((uint32_t)header[25] << 8) |
-      ((uint32_t)header[26] << 16) |
-      ((uint32_t)header[27] << 24);
-    uint16_t bitsPerSample =
-      (uint16_t)header[34] |
-      ((uint16_t)header[35] << 8);
+	if (audioFormat != 1) return false; // PCM only
 
-    if (audioFormat != 1) return false; // PCM only
+	info.sampleRate = sampleRate;
+	info.numChannels = numChannels;
+	info.bitsPerSample = bitsPerSample;
 
-    info.sampleRate    = sampleRate;
-    info.numChannels   = numChannels;
-    info.bitsPerSample = bitsPerSample;
+	// Find data chunk (fmt chunk can be variable size)
+	uint32_t pos = 12 + 8 + fmtChunkSize;
+	if (!f.seek(pos)) return false;
 
-    // Find "data" chunk (fmt chunk can be >16 bytes)
-    uint32_t pos = 12 + 8 + fmtChunkSize;
-    if (!f.seek(pos)) return false;
+	while (true) {
+		uint8_t chunkHdr[8];
+		if (f.read(chunkHdr, 8) != 8) return false;
 
-    while (true) {
-      uint8_t chunkHdr[8];
-      if (f.read(chunkHdr, 8) != 8) return false;
+		uint32_t chunkSize = (uint32_t)chunkHdr[4] |
+			((uint32_t)chunkHdr[5] << 8) |
+			((uint32_t)chunkHdr[6] << 16) |
+			((uint32_t)chunkHdr[7] << 24);
 
-      uint32_t chunkSize =
-        (uint32_t)chunkHdr[4] |
-        ((uint32_t)chunkHdr[5] << 8) |
-        ((uint32_t)chunkHdr[6] << 16) |
-        ((uint32_t)chunkHdr[7] << 24);
+		if (memcmp(chunkHdr, "data", 4) == 0) {
+			info.dataOffset = f.position();
+			info.dataSize = chunkSize;
+			return true;
+		}
 
-      if (memcmp(chunkHdr, "data", 4) == 0) {
-        info.dataOffset = f.position();
-        info.dataSize   = chunkSize;
-        return true;
-      }
+		pos = f.position() + chunkSize;
+		if (!f.seek(pos)) return false;
+	}
+}
 
-      pos = f.position() + chunkSize;
-      if (!f.seek(pos)) return false;
-    }
-  }
+// I2S audio interface setup
 
-  // ========= I2S backend → MAX98357A =========
+static I2SClass g_i2s;
+static bool g_i2sInited = false;
+static uint32_t g_i2sRate = 44100;
 
-  static I2SClass g_i2s;
-  static bool     g_i2sInited = false;
-  static uint32_t g_i2sRate   = 44100;
+// Initializes I2S interface for MAX98357A amplifier
+inline bool initMax98357A(int bclkPin, int lrckPin, int dataPin, uint32_t defaultRate = 44100) {
+	g_i2sRate = defaultRate;
+	g_i2s.setPins(bclkPin, lrckPin, dataPin);
 
-  /*
-   * Initializes the I2S audio interface connected to MAX98357A amplifier
-   * Configures the I2S pins and sets the default sample rate.
-   * Must be called before any audio playback can occur.
-   */
-  inline bool initMax98357A(int bclkPin, int lrckPin, int dataPin,
-                            uint32_t defaultRate = 44100) {
-    g_i2sRate = defaultRate;
-    g_i2s.setPins(bclkPin, lrckPin, dataPin); // BCLK, WS, DOUT
+	bool ok = g_i2s.begin(I2S_MODE_STD, g_i2sRate, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
+	g_i2sInited = ok;
+	if (!ok) {
+		Logger::log(Logger::Level::Error, "Speaker::initMax98357A: i2s.begin failed");
+		LOGGER_DEBUG(Serial.println("Speaker::initMax98357A: i2s.begin failed"));
+	}
+	return ok;
+}
 
-    bool ok = g_i2s.begin(I2S_MODE_STD,
-                          g_i2sRate,
-                          I2S_DATA_BIT_WIDTH_16BIT,
-                          I2S_SLOT_MODE_MONO);
-    g_i2sInited = ok;
-    if (!ok) {
-      Logger::log(Logger::Level::Error,
-                  "Speaker::initMax98357A: i2s.begin failed");
-      LOGGER_DEBUG(Serial.println("Speaker::initMax98357A: i2s.begin failed"));
-    }
-    return ok;
-  }
+// Adjusts sample rate if needed for current audio file
+inline bool ensureSampleRate(uint32_t rate) {
+	if (!g_i2sInited) return false;
+	if (rate == 0 || rate == g_i2sRate) return true;
 
-  /*
-   * Adjusts the I2S sample rate if needed for the current audio file
-   * Only reconfigures if the rate differs from the current setting.
-   */
-  inline bool ensureSampleRate(uint32_t rate) {
-    if (!g_i2sInited) return false;
-    if (rate == 0 || rate == g_i2sRate) return true;
+	if (!g_i2s.configureTX(rate, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO)) {
+		Logger::log(Logger::Level::Error, "Speaker::ensureSampleRate: configureTX failed");
+		LOGGER_DEBUG(Serial.println("Speaker::ensureSampleRate: configureTX failed"));
+		return false;
+	}
+	g_i2sRate = rate;
+	return true;
+}
 
-    if (!g_i2s.configureTX(rate,
-                           I2S_DATA_BIT_WIDTH_16BIT,
-                           I2S_SLOT_MODE_MONO)) {
-      Logger::log(Logger::Level::Error,
-                  "Speaker::ensureSampleRate: configureTX failed");
-      LOGGER_DEBUG(Serial.println("Speaker::ensureSampleRate: configureTX failed"));
-      return false;
-    }
-    g_i2sRate = rate;
-    return true;
-  }
+// Simple blocking player for testing (based on ESP32 I2S examples)
+inline bool playWavI2S(const char *path) {
+	if (!g_i2sInited) {
+		Logger::log(Logger::Level::Error, "playWavI2S: I2S not initialized");
+		LOGGER_DEBUG(Serial.println("playWavI2S: I2S not initialized"));
+		return false;
+	}
 
-  // ========= Simple blocking one-shot player (good for tests) =========
+	File f = SD.open(path);
+	if (!f) {
+		Logger::logf(Logger::Level::Error, "playWavI2S: failed to open %s", path ? path : "<null>");
+		LOGGER_DEBUG(Serial.print("playWavI2S: failed to open "); Serial.println(path ? path : "<null>"););
+		return false;
+	}
 
-  /*
-   * Plays a complete WAV file from start to finish (blocking)
-   * Reads the file from SD card, converts to mono if needed, and streams to I2S.
-   * This function blocks until playback completes - use the background player for normal operation.
-   */
-  inline bool playWavI2S(const char *path) {
-    if (!g_i2sInited) {
-      Logger::log(Logger::Level::Error, "playWavI2S: I2S not initialized");
-      LOGGER_DEBUG(Serial.println("playWavI2S: I2S not initialized"));
-      return false;
-    }
+	WavInfo info;
+	if (!parseWavHeader(f, info)) {
+		Logger::log(Logger::Level::Error, "playWavI2S: invalid WAV header");
+		LOGGER_DEBUG(Serial.println("playWavI2S: invalid WAV header"));
+		f.close();
+		return false;
+	}
 
-    File f = SD.open(path);
-    if (!f) {
-      Logger::logf(Logger::Level::Error,
-                   "playWavI2S: failed to open %s",
-                   path ? path : "<null>");
-      LOGGER_DEBUG(
-        Serial.print("playWavI2S: failed to open ");
-        Serial.println(path ? path : "<null>");
-      );
-      return false;
-    }
+	// Accept mono or stereo, 16-bit only
+	if (info.bitsPerSample != 16 || (info.numChannels != 1 && info.numChannels != 2)) {
+		Logger::logf(Logger::Level::Error, "playWavI2S: unsupported format (ch=%u, bits=%u)", info.numChannels, info.bitsPerSample);
+		LOGGER_DEBUG(Serial.print("playWavI2S: unsupported format"); Serial.println(")"););
+		f.close();
+		return false;
+	}
 
-    WavInfo info;
-    if (!parseWavHeader(f, info)) {
-      Logger::log(Logger::Level::Error, "playWavI2S: invalid WAV header");
-      LOGGER_DEBUG(Serial.println("playWavI2S: invalid WAV header"));
-      f.close();
-      return false;
-    }
+	if (!ensureSampleRate(info.sampleRate)) {
+		Logger::log(Logger::Level::Error, "playWavI2S: failed to set sample rate");
+		LOGGER_DEBUG(Serial.println("playWavI2S: failed to set sample rate"));
+		f.close();
+		return false;
+	}
 
-    // Accept mono or stereo, 16-bit only
-    if (info.bitsPerSample != 16 ||
-        (info.numChannels != 1 && info.numChannels != 2)) {
-      Logger::logf(Logger::Level::Error,
-                   "playWavI2S: unsupported format (ch=%u, bits=%u)",
-                   info.numChannels,
-                   info.bitsPerSample);
-      LOGGER_DEBUG(
-        Serial.print("playWavI2S: unsupported format (ch=");
-        Serial.print(info.numChannels);
-        Serial.print(", bits=");
-        Serial.print(info.bitsPerSample);
-        Serial.println(")");
-      );
-      f.close();
-      return false;
-    }
+	if (!f.seek(info.dataOffset)) {
+		Logger::log(Logger::Level::Error, "playWavI2S: failed to seek to data");
+		LOGGER_DEBUG(Serial.println("playWavI2S: failed to seek to data"));
+		f.close();
+		return false;
+	}
 
-    if (!ensureSampleRate(info.sampleRate)) {
-      Logger::log(Logger::Level::Error,
-                  "playWavI2S: failed to set sample rate");
-      LOGGER_DEBUG(Serial.println("playWavI2S: failed to set sample rate"));
-      f.close();
-      return false;
-    }
+	LOGGER_DEBUG(Serial.print("playWavI2S: sampleRate="); Serial.print(info.sampleRate); Serial.print(" Hz, channels="); Serial.println(info.numChannels););
 
-    if (!f.seek(info.dataOffset)) {
-      Logger::log(Logger::Level::Error,
-                  "playWavI2S: failed to seek to data");
-      LOGGER_DEBUG(Serial.println("playWavI2S: failed to seek to data"));
-      f.close();
-      return false;
-    }
+	const uint8_t ch = info.numChannels;
+	const uint8_t bytesPerSam = 2 * ch;
+	uint32_t remaining = info.dataSize;
 
-    LOGGER_DEBUG(
-      Serial.print("playWavI2S: sampleRate=");
-      Serial.print(info.sampleRate);
-      Serial.print(" Hz, channels=");
-      Serial.println(info.numChannels);
-    );
+	const size_t MAX_FRAMES = 256;
+	int16_t inBuf[MAX_FRAMES * 2];
+	int16_t outBuf[MAX_FRAMES];
 
-    const uint8_t  ch          = info.numChannels;
-    const uint8_t  bytesPerSam = 2 * ch;
-    uint32_t       remaining   = info.dataSize;
+	while (remaining > 0) {
+		uint32_t bytesLeft = remaining;
+		size_t maxBytes = MAX_FRAMES * bytesPerSam;
+		size_t toRead = (bytesLeft > maxBytes) ? maxBytes : bytesLeft;
 
-    const size_t   MAX_FRAMES = 256;
-    int16_t        inBuf [MAX_FRAMES * 2];
-    int16_t        outBuf[MAX_FRAMES];
+		size_t n = f.read((uint8_t*)inBuf, toRead);
+		if (!n) break;
 
-    while (remaining > 0) {
-      uint32_t bytesLeft  = remaining;
-      size_t   maxBytes   = MAX_FRAMES * bytesPerSam;
-      size_t   toRead     = (bytesLeft > maxBytes) ? maxBytes : bytesLeft;
+		size_t framesRead = n / bytesPerSam;
+		for (size_t i = 0; i < framesRead; ++i) {
+			int16_t monoSample;
+			if (ch == 1) {
+				monoSample = inBuf[i];
+			} else {
+				int16_t left = inBuf[2 * i + 0];
+				int16_t right = inBuf[2 * i + 1];
+				int32_t mix = (int32_t)left + (int32_t)right;
+				monoSample = (int16_t)(mix / 2);
+			}
+			outBuf[i] = monoSample;
+		}
 
-      size_t n = f.read((uint8_t*)inBuf, toRead);
-      if (!n) break;
+		size_t outBytes = framesRead * 2;
+		size_t written = 0;
+		while (written < outBytes) {
+			written += g_i2s.write(((uint8_t*)outBuf) + written, outBytes - written);
+		}
 
-      size_t framesRead = n / bytesPerSam;
-      for (size_t i = 0; i < framesRead; ++i) {
-        int16_t monoSample;
-        if (ch == 1) {
-          monoSample = inBuf[i];
-        } else {
-          int16_t left  = inBuf[2 * i + 0];
-          int16_t right = inBuf[2 * i + 1];
-          int32_t mix   = (int32_t)left + (int32_t)right;
-          monoSample    = (int16_t)(mix / 2);
-        }
-        outBuf[i] = monoSample;
-      }
+		remaining -= n;
+		yield();
+	}
 
-      size_t outBytes = framesRead * 2;
-      size_t written  = 0;
-      while (written < outBytes) {
-        written += g_i2s.write(
-          ((uint8_t*)outBuf) + written,
-          outBytes - written
-        );
-      }
+	f.close();
+	return true;
+}
 
-      remaining -= n;
-      yield();
-    }
+inline bool playWavI2S(const String &path) {
+	return playWavI2S(path.c_str());
+}
 
-    f.close();
-    return true;
-  }
+// Background player playlist management and gesture control integration (custom code)
 
-  inline bool playWavI2S(const String &path) {
-    return playWavI2S(path.c_str());
-  }
+static const size_t MAX_TRACKS = 16;
+static const char* g_playlist[MAX_TRACKS];
+static size_t g_playlistCount = 0;
+static size_t g_currentIndex = 0;
 
-  // ========= Background player: playlist + controls =========
+// Control commands from gesture recognition
+static volatile bool g_cmdNext = false;
+static volatile bool g_cmdPrev = false;
+static volatile bool g_cmdPauseToggle = false;
+static volatile int g_cmdVolDelta = 0;
+static volatile bool g_stopRequested = false;
+static volatile bool g_paused = false;
 
-  // Max number of tracks in playlist
-  static const size_t MAX_TRACKS = 16;
+static float g_volume = 1.0f; // Software volume control
+static TaskHandle_t g_audioTaskHandle = nullptr;
 
-  static const char* g_playlist[MAX_TRACKS];
-  static size_t      g_playlistCount = 0;
-  static size_t      g_currentIndex  = 0;
+inline void setPlaylist(const char* const* files, size_t count) {
+	if (count > MAX_TRACKS) count = MAX_TRACKS;
+	for (size_t i = 0; i < count; ++i) {
+		g_playlist[i] = files[i];
+	}
+	g_playlistCount = count;
+	g_currentIndex = 0;
+}
 
-  // Player commands & state (safe from gesture code)
-  static volatile bool g_cmdNext        = false;
-  static volatile bool g_cmdPrev        = false;
-  static volatile bool g_cmdPauseToggle = false;
-  static volatile int  g_cmdVolDelta    = 0; // +/- steps
-  static volatile bool g_stopRequested  = false;
-  static volatile bool g_paused         = false;
+// Gesture control API
+inline void nextTrack() { g_cmdNext = true; }
+inline void prevTrack() { g_cmdPrev = true; }
+inline void pauseToggle() { g_cmdPauseToggle = true; }
+inline void stopPlayback() { g_stopRequested = true; }
+inline void volumeUp() { g_cmdVolDelta++; }
+inline void volumeDown() { g_cmdVolDelta--; }
 
-  // Volume (software gain)
-  static float g_volume = 1.0f; // 1.0 = unity, 0.0 = mute, up to ~2.0
+// Helper for volume scaling
+inline int16_t clamp16(int32_t x) {
+	if (x > 32767) return 32767;
+	if (x < -32768) return -32768;
+	return (int16_t)x;
+}
 
-  // Audio task handle
-  static TaskHandle_t g_audioTaskHandle = nullptr;
-
-  inline void setPlaylist(const char* const* files, size_t count) {
-    if (count > MAX_TRACKS) count = MAX_TRACKS;
-    for (size_t i = 0; i < count; ++i) {
-      g_playlist[i] = files[i];
-    }
-    g_playlistCount = count;
-    g_currentIndex  = 0;
-  }
-
-  // Control API – call these from your gesture code
-  
-  /* Skips to the next track in the playlist */
-  inline void nextTrack()       { g_cmdNext        = true; }
-  
-  /* Returns to the previous track in the playlist */
-  inline void prevTrack()       { g_cmdPrev        = true; }
-  
-  /* Toggles between play and pause states */
-  inline void pauseToggle()     { g_cmdPauseToggle = true; }
-  
-  /* Stops playback and terminates the audio task */
-  inline void stopPlayback()    { g_stopRequested  = true; }
-  
-  /* Increases the volume by one step */
-  inline void volumeUp()        { g_cmdVolDelta++; }
-  
-  /* Decreases the volume by one step */
-  inline void volumeDown()      { g_cmdVolDelta--; }
-
-  // ==== internal helpers / task ====
-
-  /*
-   * Clamps a 32-bit value to 16-bit signed range
-   * Prevents audio clipping when applying volume scaling.
-   */
-  inline int16_t clamp16(int32_t x) {
-    if (x > 32767) return 32767;
-    if (x < -32768) return -32768;
-    return (int16_t)x;
-  }
-
-  /*
-   * FreeRTOS task that manages continuous audio playback
-   * Handles the playlist, processes control commands, applies volume scaling,
-   * and streams audio data to the I2S interface. Runs in background.
-   */
-  static void audioTask(void* /*arg*/) {
-    LOGGER_DEBUG(Serial.println("Speaker::audioTask: started"));
+// FreeRTOS audio playback task with gesture control integration
+static void audioTask(void*){
+	LOGGER_DEBUG(Serial.println("Speaker::audioTask: started"));
 
     for (;;) {
       if (g_stopRequested) break;

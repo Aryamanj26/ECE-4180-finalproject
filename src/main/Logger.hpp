@@ -1,10 +1,10 @@
 /*
  * System Logger and LED Status Indicator
  * 
- * Provides thread-safe logging to SD card with RGB LED status indication.
- * Uses FreeRTOS semaphores to ensure safe concurrent access to the SD card.
- * LED colors indicate system state: green (idle), blue (processing gesture),
- * yellow (weak gesture), cyan (WiFi active), red (error).
+ * Thread-safe logging to SD card with RGB LED status indication.
+ * Uses FreeRTOS semaphores for safe concurrent access.
+ * LED colors: green (idle), blue (gesture detected), yellow (weak gesture),
+ * cyan (WiFi), red (error/disabled).
  */
 
 #pragma once
@@ -23,28 +23,28 @@
 #endif
 
 extern "C" {
-  #include "freertos/FreeRTOS.h"
-  #include "freertos/semphr.h"
+	#include "freertos/FreeRTOS.h"
+	#include "freertos/semphr.h"
 }
 
 namespace Logger {
 
 enum class Level : uint8_t {
-  Info,
-  Warn,
-  Error
+	Info,
+	Warn,
+	Error
 };
 
-// -------- internal state (function-local statics to avoid multiple defs) --------
+// Internal state using function-local statics
 
 inline SemaphoreHandle_t& sdMutexRef() {
-  static SemaphoreHandle_t h = nullptr;
-  return h;
+	static SemaphoreHandle_t h = nullptr;
+	return h;
 }
 
 inline const char*& logPathRef() {
-  static const char* p = "/system.log";   // keep it out of /tracks
-  return p;
+	static const char* p = "/system.log";
+	return p;
 }
 
 inline int& pinRRef() { static int v = -1; return v; }
@@ -52,75 +52,60 @@ inline int& pinGRef() { static int v = -1; return v; }
 inline int& pinBRef() { static int v = -1; return v; }
 
 inline bool& initializedRef() {
-  static bool b = false;
-  return b;
+	static bool b = false;
+	return b;
 }
 
-// -------- LED helpers --------
+// LED control functions
 
-/*
- * Sets the RGB LED to a specific color combination
- * Controls the three LED pins to create different status colors.
- */
 inline void setLed(bool r, bool g, bool b) {
-  int pinR = pinRRef();
-  int pinG = pinGRef();
-  int pinB = pinBRef();
-  if (pinR < 0 || pinG < 0 || pinB < 0) return;
+	int pinR = pinRRef();
+	int pinG = pinGRef();
+	int pinB = pinBRef();
+	if (pinR < 0 || pinG < 0 || pinB < 0) return;
 
-  digitalWrite(pinR, r ? HIGH : LOW);
-  digitalWrite(pinG, g ? HIGH : LOW);
-  digitalWrite(pinB, b ? HIGH : LOW);
+	digitalWrite(pinR, r ? HIGH : LOW);
+	digitalWrite(pinG, g ? HIGH : LOW);
+	digitalWrite(pinB, b ? HIGH : LOW);
 }
 
-// LED status indicator functions for different system states
-inline void ledIdle() { setLed(false, true,  false); } // green - system ready
-inline void ledBusy() { setLed(false, false, true ); } // blue - gesture recognized
-inline void ledWarn() { setLed(true,  true,  false); } // yellow - weak/unclear gesture
-inline void ledWifi() { setLed(false, true,  true ); } // cyan - WiFi active
-inline void ledError(){ setLed(true,  false, false); } // red - error or system disabled
+// LED status indicators
+inline void ledIdle() { setLed(false, true, false); }  // green
+inline void ledBusy() { setLed(false, false, true); }  // blue
+inline void ledWarn() { setLed(true, true, false); }   // yellow
+inline void ledWifi() { setLed(false, true, true); }   // cyan
+inline void ledError() { setLed(true, false, false); } // red
 
-// -------- init --------
+// Initialize logger with SD mutex and LED pins
+inline void init(SemaphoreHandle_t sdMutex, const char* logPath, int pinR, int pinG, int pinB) {
+	sdMutexRef() = sdMutex;
+	if (logPath && logPath[0] != '\0') {
+		logPathRef() = logPath;
+	}
 
-/*
- * Initializes the logger with SD card mutex and LED pins
- * Sets up the RGB LED pins and writes a startup message to the log file.
- * Must be called before using any logging functions.
- */
-inline void init(SemaphoreHandle_t sdMutex,
-                 const char* logPath,
-                 int pinR, int pinG, int pinB)
-{
-  sdMutexRef() = sdMutex;
-  if (logPath && logPath[0] != '\0') {
-    logPathRef() = logPath;
-  }
+	pinRRef() = pinR;
+	pinGRef() = pinG;
+	pinBRef() = pinB;
 
-  pinRRef() = pinR;
-  pinGRef() = pinG;
-  pinBRef() = pinB;
+	pinMode(pinR, OUTPUT);
+	pinMode(pinG, OUTPUT);
+	pinMode(pinB, OUTPUT);
 
-  pinMode(pinR, OUTPUT);
-  pinMode(pinG, OUTPUT);
-  pinMode(pinB, OUTPUT);
+	ledIdle();
 
-  ledIdle();
+	// Write startup message
+	SemaphoreHandle_t m = sdMutexRef();
+	if (m && xSemaphoreTake(m, pdMS_TO_TICKS(10)) == pdTRUE) {
+		File f = SD.open(logPathRef(), FILE_WRITE);
+		if (f) {
+			f.println("=== Logger started ===");
+			f.close();
+		}
+		xSemaphoreGive(m);
+	}
 
-  // Write a header line, best effort (short timeout)
-  SemaphoreHandle_t m = sdMutexRef();
-  if (m && xSemaphoreTake(m, pdMS_TO_TICKS(10)) == pdTRUE) {
-    File f = SD.open(logPathRef(), FILE_WRITE);
-    if (f) {
-      f.println("=== Logger started ===");
-      f.close();
-    }
-    xSemaphoreGive(m);
-  }
-
-  initializedRef() = true;
+	initializedRef() = true;
 }
-
-// -------- low-level write helper --------
 
 /*
  * Internal helper that writes a timestamped log line to the SD card
@@ -132,7 +117,7 @@ inline void writeLine(Level level, const char* line) {
   SemaphoreHandle_t m = sdMutexRef();
   if (!m) return;
 
-  // Don’t block long – if SD is busy (audio), drop the log
+  // Don’t block long if SD is busy (audio), drop the log
   if (xSemaphoreTake(m, pdMS_TO_TICKS(5)) != pdTRUE) {
     return;
   }
@@ -160,36 +145,30 @@ inline void writeLine(Level level, const char* line) {
   xSemaphoreGive(m);
 }
 
-// -------- public logging API --------
+// Public logging API
 
-/*
- * Logs a message with the specified severity level
- * Messages are timestamped and written to the SD card log file.
- */
+// Log a message with specified severity level
 inline void log(Level level, const char* msg) {
-  if (!initializedRef() || !msg) return;
+	if (!initializedRef() || !msg) return;
 
-  if (level == Level::Error) {
-    ledError();
-  }
+	if (level == Level::Error) {
+		ledError();
+	}
 
-  writeLine(level, msg);
+	writeLine(level, msg);
 }
 
-/*
- * Logs a formatted message with the specified severity level
- * Similar to printf - accepts format strings and variable arguments.
- */
+// Log formatted message (printf-style)
 inline void logf(Level level, const char* fmt, ...) {
-  if (!initializedRef() || !fmt) return;
+	if (!initializedRef() || !fmt) return;
 
-  char buf[160];
-  va_list args;
-  va_start(args, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, args);
-  va_end(args);
+	char buf[160];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, args);
+	va_end(args);
 
-  log(level, buf);
+	log(level, buf);
 }
 
 } // namespace Logger

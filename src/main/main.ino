@@ -18,7 +18,6 @@
 #include <GestureClassifier.hpp>
 #include <Speaker.hpp>
 
-// I2C + XSHUT wiring
 #define SDA_PIN   6
 #define SCL_PIN   7
 #define XSHUT_L   2
@@ -270,7 +269,7 @@ void setup() {
 }
 
 /*
- * Arduino main loop - runs indefinitely
+ * Arduino main loop. runs indefinitely
  * All work is done in FreeRTOS tasks, so this just sleeps forever.
  */
 void loop() {
