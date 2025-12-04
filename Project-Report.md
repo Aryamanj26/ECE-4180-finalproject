@@ -8,7 +8,7 @@ I built a contactless music player that responds to hand gestures in mid-air. By
 **System Circuit Diagram:**
 The overall wiring of the ESP32, time of flight sensors, MAX98357A amplifier, SD card, LED, and button is shown in the following diagram:
 
-![System Circuit Diagram](circuit%20diagram.png)
+![System Circuit Diagram](circuitdiagram.png)
 
 **VL53L0X Time-of-Flight Sensors (3 sensors):** The sensors are arranged in a triangular arrangement (left, right, and top positions) such that they enable proper X-Y spatial mapping by determining which sensor detects the hand first. When you swipe left, the left sensor triggers before the right. When you swipe up, the bottom two sensors (left and right) detect motion before the top sensor. This geometric layout makes directional classification possible. A key technical challenge was the low sample rate of the sensors and ensuring each sensor operates independently on the I2C bus without interference. Each one had to be assigned a unique address (0x30, 0x31, 0x32) using the XSHUT pins to power cycle them individually during initialization. The system samples all three sensors at roughly 50 Hz, and the preprocessing pipeline applies median filtering, exponential moving average smoothing, and nearest layer gating (that enables tracking the closest object within a 20mm depth window and filtering out background noise).
 
