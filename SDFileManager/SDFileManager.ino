@@ -1,240 +1,275 @@
 /*
- * SD Card File Manager via WiFi
- * 
- * Creates a WiFi access point and web server for managing files on SD card.
- * Allows uploading, downloading, and deleting WAV files through a browser.
- */
+ simple sd card file manager over wifi
+ creates an access point and simple web page to upload download and delete files
+ mostly used for loading music onto the card without pulling it out
+*/
 
 #include <WiFi.h>
 #include <WebServer.h>
 #include <SD.h>
 #include <SPI.h>
 
-const char* ssid = "ESP32-Music";
-const char* password = "12345678";
+const char *aWifiSsid = "ESP32-Music";
+const char *aWifiPassword = "12345678";
 
 #define SD_CS 9
 
-WebServer server(80);
-File uploadFile;
+WebServer aWebServer(80);
+File aUploadFile;
 
-// Convert file size to human-readable format
-String humanSize(uint64_t bytes) {
-	if (bytes < 1024) return String(bytes) + " B";
-	double kb = bytes / 1024.0;
-	if (kb < 1024) return String(kb, 1) + " KB";
-	double mb = kb / 1024.0;
-	if (mb < 1024) return String(mb, 1) + " MB";
-	double gb = mb / 1024.0;
-	return String(gb, 1) + " GB";
+// turn a raw byte size into something human readable like kb or mb
+String makeHumanSize(uint64_t aByteCount)
+{
+	if (aByteCount < 1024)
+	{
+		return String(aByteCount) + " B";
+	}
+	double aKiloBytes = aByteCount / 1024.0;
+	if (aKiloBytes < 1024)
+	{
+		return String(aKiloBytes, 1) + " KB";
+	}
+	double aMegaBytes = aKiloBytes / 1024.0;
+	if (aMegaBytes < 1024)
+	{
+		return String(aMegaBytes, 1) + " MB";
+	}
+	double aGigaBytes = aMegaBytes / 1024.0;
+	return String(aGigaBytes, 1) + " GB";
 }
 
-// Generate HTML table of all files on SD card
-String makeFileTable() {
-	String html;
-	File root = SD.open("/");
-	if (!root) {
-		return "<p>Failed to open SD root.</p>";
+// build a simple html table for every file we find on the sd card
+String makeFileTable()
+{
+	String aHtml;
+	File aRootDirectory = SD.open("/");
+	if (!aRootDirectory)
+	{
+		return "<p>failed to open sd root</p>";
 	}
 
-	html += "<table border='1' cellpadding='4' cellspacing='0'>"
-	        "<tr><th>Name</th><th>Size</th><th>Actions</th></tr>";
+	aHtml += "<table border='1' cellpadding='4' cellspacing='0'>";
+	aHtml += "<tr><th>name</th><th>size</th><th>actions</th></tr>";
 
-	while (true) {
-		File f = root.openNextFile();
-		if (!f) break;
-		String name = String(f.name());
-		uint64_t size = f.size();
-		f.close();
+	while (true)
+	{
+		File aCurrentFile = aRootDirectory.openNextFile();
+		if (!aCurrentFile)
+		{
+			break;
+		}
 
-		// Strip leading slash from filename
-		String displayName = name;
-		if (displayName.startsWith("/")) displayName.remove(0, 1);
+		String aRawName = String(aCurrentFile.name());
+		uint64_t aFileSizeBytes = aCurrentFile.size();
+		aCurrentFile.close();
 
-		html += "<tr>";
-		html += "<td>" + displayName + "</td>";
-		html += "<td>" + humanSize(size) + "</td>";
-		html += "<td>";
+		// drop the leading slash so it looks cleaner in the table
+		String aDisplayName = aRawName;
+		if (aDisplayName.startsWith("/"))
+		{
+			aDisplayName.remove(0, 1);
+		}
 
-		// Download button
-		html += "<form style='display:inline' method='GET' action='/download'>";
-		html += "<input type='hidden' name='name' value='" + displayName + "'>";
-		html += "<input type='submit' value='Download'>";
-		html += "</form>";
+		aHtml += "<tr>";
+		aHtml += "<td>" + aDisplayName + "</td>";
+		aHtml += "<td>" + makeHumanSize(aFileSizeBytes) + "</td>";
+		aHtml += "<td>";
 
-		html += "&nbsp;";
+		// basic download button form
+		aHtml += "<form style='display:inline' method='GET' action='/download'>";
+		aHtml += "<input type='hidden' name='name' value='" + aDisplayName + "'>";
+		aHtml += "<input type='submit' value='Download'>";
+		aHtml += "</form>";
 
-		// Delete button
-		html += "<form style='display:inline' method='POST' action='/delete' onsubmit='return confirm(\"Delete "
-		        + displayName + " ?\");'>";
-		html += "<input type='hidden' name='name' value='" + displayName + "'>";
-		html += "<input type='submit' value='Delete'>";
-		html += "</form>";
+		aHtml += "&nbsp;";
 
-		html += "</td>";
-		html += "</tr>";
+		// delete button that asks for a quick confirm in the browser
+		aHtml += "<form style='display:inline' method='POST' action='/delete' onsubmit='return confirm(\"Delete "
+		        + aDisplayName + " ?\");'>";
+		aHtml += "<input type='hidden' name='name' value='" + aDisplayName + "'>";
+		aHtml += "<input type='submit' value='Delete'>";
+		aHtml += "</form>";
+
+		aHtml += "</td>";
+		aHtml += "</tr>";
 	}
 
-	html += "</table>";
-	return html;
+	aHtml += "</table>";
+	return aHtml;
 }
 
-// Serve the main file manager web page
-void handleRoot() {
-	String page;
-	page += "<html><head><title>ESP32 SD File Manager</title></head><body>";
-	page += "<h2>ESP32 SD File Manager</h2>";
+// send the main html page that shows upload form and current files
+void handleRoot()
+{
+	String aPageHtml;
+	aPageHtml += "<html><head><title>ESP32 SD File Manager</title></head><body>";
+	aPageHtml += "<h2>ESP32 SD File Manager</h2>";
 
-	// Upload form
-	page += "<h3>Upload file</h3>";
-	page += "<form method='POST' action='/upload' enctype='multipart/form-data'>";
-	page += "File: <input type='file' name='upload'><br><br>";
-	page += "<input type='submit' value='Upload'>";
-	page += "</form>";
+	aPageHtml += "<h3>Upload file</h3>";
+	aPageHtml += "<form method='POST' action='/upload' enctype='multipart/form-data'>";
+	aPageHtml += "File: <input type='file' name='upload'><br><br>";
+	aPageHtml += "<input type='submit' value='Upload'>";
+	aPageHtml += "</form>";
 
-	// File list
-	page += "<h3>Files on SD</h3>";
-	page += makeFileTable();
+	aPageHtml += "<h3>Files on SD</h3>";
+	aPageHtml += makeFileTable();
 
-	page += "<br><hr><small>Connect to WiFi \"" + String(ssid) +
+	aPageHtml += "<br><hr><small>connect to wifi \"" + String(aWifiSsid) +
 	        "\" and open http://192.168.4.1/</small>";
-	page += "</body></html>";
+	aPageHtml += "</body></html>";
 
-	server.send(200, "text/html", page);
+	aWebServer.send(200, "text/html", aPageHtml);
 }
 
-// Handle file upload from browser (receives data in chunks)
-void handleUpload() {
-	HTTPUpload& upload = server.upload();
+// receive an upload from the browser in chunks and write it to sd
+void handleUpload()
+{
+	HTTPUpload &aUploadStatus = aWebServer.upload();
 
-	if (upload.status == UPLOAD_FILE_START) {
-		String filename = "/" + upload.filename;
-		Serial.print("Upload start: ");
-		Serial.println(filename);
+	if (aUploadStatus.status == UPLOAD_FILE_START)
+	{
+		String aFileNamePath = "/" + aUploadStatus.filename;
+		Serial.print("upload start ");
+		Serial.println(aFileNamePath);
 
-		if (SD.exists(filename)) SD.remove(filename);
-		uploadFile = SD.open(filename, FILE_WRITE);
+		if (SD.exists(aFileNamePath))
+		{
+			SD.remove(aFileNamePath);
+		}
+		aUploadFile = SD.open(aFileNamePath, FILE_WRITE);
 	}
-	else if (upload.status == UPLOAD_FILE_WRITE) {
-		if (uploadFile) {
-			uploadFile.write(upload.buf, upload.currentSize);
+	else if (aUploadStatus.status == UPLOAD_FILE_WRITE)
+	{
+		if (aUploadFile)
+		{
+			aUploadFile.write(aUploadStatus.buf, aUploadStatus.currentSize);
 		}
 	}
-	else if (upload.status == UPLOAD_FILE_END) {
-		if (uploadFile) {
-			uploadFile.close();
-			Serial.print("Upload end, size = ");
-			Serial.println(upload.totalSize);
-		} else {
-			Serial.println("Upload failed: file not open");
+	else if (aUploadStatus.status == UPLOAD_FILE_END)
+	{
+		if (aUploadFile)
+		{
+			aUploadFile.close();
+			Serial.print("upload end size = ");
+			Serial.println(aUploadStatus.totalSize);
+		}
+		else
+		{
+			Serial.println("upload failed because file was not open");
 		}
 
-		// Show confirmation page
-		String page;
-		page += "<html><body>";
-		page += "<p>Upload finished: " + String(upload.filename) + "</p>";
-		page += "<a href='/'>Back to file manager</a>";
-		page += "</body></html>";
+		String aPageHtml;
+		aPageHtml += "<html><body>";
+		aPageHtml += "<p>upload finished: " + String(aUploadStatus.filename) + "</p>";
+		aPageHtml += "<a href='/'>back to file manager</a>";
+		aPageHtml += "</body></html>";
 
-		server.send(200, "text/html", page);
+		aWebServer.send(200, "text/html", aPageHtml);
 	}
 }
 
-// Handle file deletion request
-void handleDelete() {
-	if (!server.hasArg("name")) {
-		server.send(400, "text/plain", "Missing 'name' parameter");
+// handle a delete button click from the web ui
+void handleDelete()
+{
+	if (!aWebServer.hasArg("name"))
+	{
+		aWebServer.send(400, "text/plain", "missing name parameter");
 		return;
 	}
 
-	String shortName = server.arg("name");
-	String fullPath = "/" + shortName;
+	String aShortName = aWebServer.arg("name");
+	String aFullPath = "/" + aShortName;
 
-	Serial.print("Delete request: ");
-	Serial.println(fullPath);
+	Serial.print("delete request for ");
+	Serial.println(aFullPath);
 
-	if (SD.exists(fullPath)) {
-		SD.remove(fullPath);
-		Serial.println("File deleted.");
-	} else {
-		Serial.println("File not found.");
+	if (SD.exists(aFullPath))
+	{
+		SD.remove(aFullPath);
+		Serial.println("file deleted");
+	}
+	else
+	{
+		Serial.println("file not found");
 	}
 
-	// Redirect back to main page
-	server.sendHeader("Location", "/", true);
-	server.send(303);
+	aWebServer.sendHeader("Location", "/", true);
+	aWebServer.send(303);
 }
 
-// Handle file download request
-void handleDownload() {
-	if (!server.hasArg("name")) {
-		server.send(400, "text/plain", "Missing 'name' parameter");
+// send a file back to the browser when user clicks download
+void handleDownload()
+{
+	if (!aWebServer.hasArg("name"))
+	{
+		aWebServer.send(400, "text/plain", "missing name parameter");
 		return;
 	}
 
-	String shortName = server.arg("name");
-	String fullPath = "/" + shortName;
+	String aShortName = aWebServer.arg("name");
+	String aFullPath = "/" + aShortName;
 
-	Serial.print("Download request: ");
-	Serial.println(fullPath);
+	Serial.print("download request for ");
+	Serial.println(aFullPath);
 
-	if (!SD.exists(fullPath)) {
-		server.send(404, "text/plain", "File not found");
+	if (!SD.exists(aFullPath))
+	{
+		aWebServer.send(404, "text/plain", "file not found");
 		return;
 	}
 
-	File f = SD.open(fullPath, FILE_READ);
-	if (!f) {
-		server.send(500, "text/plain", "Failed to open file");
+	File aFileToSend = SD.open(aFullPath, FILE_READ);
+	if (!aFileToSend)
+	{
+		aWebServer.send(500, "text/plain", "failed to open file");
 		return;
 	}
 
-	server.streamFile(f, "application/octet-stream");
-	f.close();
+	aWebServer.streamFile(aFileToSend, "application/octet-stream");
+	aFileToSend.close();
 }
 
-void setup() {
+void setup()
+{
 	Serial.begin(115200);
 	delay(1000);
 
-	Serial.println("Starting SD File Manager...");
+	Serial.println("starting sd file manager");
 
-	// Initialize SPI for SD card
+	// get sd card ready using the same pins as the main project
 	SPI.begin(18, 19, 23, SD_CS);
 
-	if (!SD.begin(SD_CS)) {
-		Serial.println("SD init failed");
-		while (true) delay(1000);
+	if (!SD.begin(SD_CS))
+	{
+		Serial.println("sd init failed so we stop here");
+		while (true)
+		{
+			delay(1000);
+		}
 	}
-	Serial.println("SD init OK");
+	Serial.println("sd init ok");
 
-	// Start WiFi access point
+	// bring up a small wifi access point so phone or laptop can connect
 	WiFi.mode(WIFI_AP);
-	WiFi.softAP(ssid, password);
+	WiFi.softAP(aWifiSsid, aWifiPassword);
 
-	Serial.println("SoftAP started");
-	Serial.print("SSID: ");
-	Serial.println(ssid);
-	Serial.print("Password: ");
-	Serial.println(password);
-	Serial.println("Open http://192.168.4.1/ in your browser.");
+	Serial.println("softap started");
+	Serial.print("ssid: ");
+	Serial.println(aWifiSsid);
+	Serial.print("password: ");
+	Serial.println(aWifiPassword);
+	Serial.println("open http://192.168.4.1/ in your browser");
 
-	// Register web server routes
-	server.on("/", HTTP_GET, handleRoot);
+	// normal style handlers instead of lambdas so it reads simpler
+	aWebServer.on("/", HTTP_GET, handleRoot);
+	aWebServer.on("/upload", HTTP_POST, handleUpload);
+	aWebServer.on("/delete", HTTP_POST, handleDelete);
+	aWebServer.on("/download", HTTP_GET, handleDownload);
 
-	server.on(
-		"/upload",
-		HTTP_POST,
-		[]() { /* POST response handled in handleUpload */ },
-		handleUpload
-	);
-
-	server.on("/delete", HTTP_POST, handleDelete);
-	server.on("/download", HTTP_GET, handleDownload);
-
-	server.begin();
+	aWebServer.begin();
 }
 
-void loop() {
-	server.handleClient();
+void loop()
+{
+	aWebServer.handleClient();
 }

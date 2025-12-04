@@ -38,13 +38,14 @@
 SemaphoreHandle_t g_sdMutex = nullptr;
 volatile bool     g_systemEnabled = true;
 
-Adafruit_VL53L0X L;
-Adafruit_VL53L0X R;
-Adafruit_VL53L0X T;
+Adafruit_VL53L0X theSensorL;
+Adafruit_VL53L0X theSensorR;
+Adafruit_VL53L0X theSensorT;
 
-GesturePreprocessor gp;
+GesturePreprocessor theGesturePreprocessor;
 
-const char* kTracks[] = {
+const char* kTracks[] =
+{
   "/Rick-Roll-Sound-Effect.wav",
   "/afro-11-324020.wav",
   "/memphis-trap-wav-349366.wav"
@@ -58,18 +59,23 @@ volatile uint32_t g_lastButtonPressMs = 0;
  * Toggles the system between enabled and disabled states with debouncing.
  * When disabled, gesture recognition pauses and audio playback is paused.
  */
-void IRAM_ATTR buttonISR() {
-  uint32_t now = millis();
-  if (now - g_lastButtonPressMs < 300) {
+void IRAM_ATTR buttonISR()
+{
+  uint32_t theNow = millis();
+  if (theNow - g_lastButtonPressMs < 300)
+  {
     return;
   }
-  g_lastButtonPressMs = now;
+  g_lastButtonPressMs = theNow;
 
   g_systemEnabled = !g_systemEnabled;
 
-  if (g_systemEnabled) {
+  if (g_systemEnabled)
+  {
     Speaker::pauseToggle();
-  } else {
+  }
+  else
+  {
     Speaker::pauseToggle();
   }
 }
@@ -79,19 +85,21 @@ void IRAM_ATTR buttonISR() {
  * Uses the XSHUT pin to power cycle the sensor before setting its new address.
  * This allows multiple sensors on the same I2C bus with unique addresses.
  */
-bool initSensor(Adafruit_VL53L0X &sensor, int xshutPin, uint8_t newAddr) {
-  pinMode(xshutPin, OUTPUT);
-  digitalWrite(xshutPin, LOW);
+bool initSensor(Adafruit_VL53L0X &aSensor, int anXshutPin, uint8_t aNewAddr)
+{
+  pinMode(anXshutPin, OUTPUT);
+  digitalWrite(anXshutPin, LOW);
   delay(5);
-  digitalWrite(xshutPin, HIGH);
+  digitalWrite(anXshutPin, HIGH);
   delay(5);
-  if (!sensor.begin(newAddr, false, &Wire)) {
+  if (!aSensor.begin(aNewAddr, false, &Wire))
+  {
     Logger::logf(Logger::Level::Error,
                  "Failed to init VL53L0X at addr 0x%02X",
-                 newAddr);
+                 aNewAddr);
     LOGGER_DEBUG(
       Serial.print("Failed to init VL53L0X at addr 0x");
-      Serial.println(newAddr, HEX);
+      Serial.println(aNewAddr, HEX);
     );
     return false;
   }
@@ -101,13 +109,14 @@ bool initSensor(Adafruit_VL53L0X &sensor, int xshutPin, uint8_t newAddr) {
 /*
  * Reads distance measurement from a VL53L0X sensor
  * Returns the distance in millimeters, or 0xFFFF if the reading is invalid
- * (e.g., out of range or sensor error).
  */
-uint16_t readVL(Adafruit_VL53L0X &s) {
-  VL53L0X_RangingMeasurementData_t measure;
-  s.rangingTest(&measure, false);
-  if (measure.RangeStatus != 4) {
-    return measure.RangeMilliMeter;
+uint16_t readVL(Adafruit_VL53L0X &aSensor)
+{
+  VL53L0X_RangingMeasurementData_t theMeasure;
+  aSensor.rangingTest(&theMeasure, false);
+  if (theMeasure.RangeStatus != 4)
+  {
+    return theMeasure.RangeMilliMeter;
   }
   return 0xFFFF;
 }
@@ -117,57 +126,75 @@ uint16_t readVL(Adafruit_VL53L0X &s) {
  * Runs at approximately 50 Hz to capture hand movements. When a gesture episode
  * is detected and classified, it triggers the corresponding music control action.
  */
-void gestureTask(void* arg) {
-  for (;;) {
-    if (!g_systemEnabled) {
+void gestureTask(void* anArg)
+{
+  for (;;)
+  {
+    if (!g_systemEnabled)
+    {
       Logger::ledError();
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
 
-    uint32_t now = millis();
+    uint32_t theNow = millis();
 
-    uint16_t dL = readVL(L);
-    uint16_t dR = readVL(R);
-    uint16_t dT = readVL(T);
+    uint16_t theDistanceL = readVL(theSensorL);
+    uint16_t theDistanceR = readVL(theSensorR);
+    uint16_t theDistanceT = readVL(theSensorT);
 
-    GestureEvent ev = gp.update(dL, dR, dT, now);
-    if (ev == GestureEvent::EpisodeReady) {
-      const GestureEpisode &ep = gp.lastEpisode();
+    GestureEvent theEvent = theGesturePreprocessor.update(theDistanceL, theDistanceR, theDistanceT, theNow);
+    if (theEvent == GestureEvent::EpisodeReady)
+    {
+      const GestureEpisode &theEpisode = theGesturePreprocessor.lastEpisode();
 
-      uint32_t dur = ep.tEndMs - ep.tStartMs;
+      uint32_t theDuration = theEpisode.tEndMs - theEpisode.tStartMs;
 
-      auto swingOf = [&](int i)->uint16_t {
-        if (ep.dMin[i] == 0xFFFF) return 0;
-        return ep.dMax[i] - ep.dMin[i];
-      };
+      // calculate how much each sensor value changed during the gesture
+      uint16_t theSwingL = 0;
+      if (theEpisode.dMin[0] != 0xFFFF)
+      {
+        theSwingL = theEpisode.dMax[0] - theEpisode.dMin[0];
+      }
 
-      uint16_t swingL = swingOf(0);
-      uint16_t swingR = swingOf(1);
-      uint16_t swingT = swingOf(2);
+      uint16_t theSwingR = 0;
+      if (theEpisode.dMin[1] != 0xFFFF)
+      {
+        theSwingR = theEpisode.dMax[1] - theEpisode.dMin[1];
+      }
 
-      GestureDir dir = classifyEpisode(ep);
+      uint16_t theSwingT = 0;
+      if (theEpisode.dMin[2] != 0xFFFF)
+      {
+        theSwingT = theEpisode.dMax[2] - theEpisode.dMin[2];
+      }
+
+      GestureDir theDirection = classifyEpisode(theEpisode);
 
       LOGGER_DEBUG(
         Serial.print("EPISODE dur=");
-        Serial.print(dur);
+        Serial.print(theDuration);
         Serial.print("ms  swing(L,R,T)=");
-        Serial.print(swingL); Serial.print(",");
-        Serial.print(swingR); Serial.print(",");
-        Serial.print(swingT); Serial.print("  maxV(L,R,T)=");
-        Serial.print(ep.maxApproachVel[0]); Serial.print(",");
-        Serial.print(ep.maxApproachVel[1]); Serial.print(",");
-        Serial.print(ep.maxApproachVel[2]);
+        Serial.print(theSwingL); Serial.print(",");
+        Serial.print(theSwingR); Serial.print(",");
+        Serial.print(theSwingT); Serial.print("  maxV(L,R,T)=");
+        Serial.print(theEpisode.maxApproachVel[0]); Serial.print(",");
+        Serial.print(theEpisode.maxApproachVel[1]); Serial.print(",");
+        Serial.print(theEpisode.maxApproachVel[2]);
         Serial.print("  -> ");
       );
 
-      if (dir == GestureDir::None) {
+      if (theDirection == GestureDir::None)
+      {
         Logger::ledWarn();
-      } else {
+      }
+      else
+      {
         Logger::ledBusy();
       }
 
-      switch (dir) {
+      switch (theDirection)
+      {
         case GestureDir::Left:
           Logger::log(Logger::Level::Info, "Gesture recognized: LEFT");
           LOGGER_DEBUG(Serial.println("LEFT -> prevTrack()"));
@@ -212,11 +239,13 @@ void gestureTask(void* arg) {
  * Arduino setup function - initializes all hardware and starts tasks
  * Sets up sensors, SD card, audio output, WiFi file manager, and gesture recognition.
  */
-void setup() {
+void setup()
+{
   Serial.begin(115200);
   delay(1000);
 
-  if (!g_sdMutex) {
+  if (!g_sdMutex)
+  {
     g_sdMutex = xSemaphoreCreateMutex();
   }
 
@@ -232,29 +261,37 @@ void setup() {
   digitalWrite(XSHUT_T, LOW);
   delay(10);
 
-  initSensor(L, XSHUT_L, ADDR_L);
-  initSensor(R, XSHUT_R, ADDR_R);
-  initSensor(T, XSHUT_T, ADDR_T);
+  initSensor(theSensorL, XSHUT_L, ADDR_L);
+  initSensor(theSensorR, XSHUT_R, ADDR_R);
+  initSensor(theSensorT, XSHUT_T, ADDR_T);
 
   LOGGER_DEBUG(Serial.println("VL53L0X triangle + gesture episode detector ready"));
 
   SPI.begin(18, 19, 23, SD_CS);
-  if (!SD.begin(SD_CS, SPI, 10000000)) {
+  if (!SD.begin(SD_CS, SPI, 10000000))
+  {
     Logger::log(Logger::Level::Error, "SD init failed");
     LOGGER_DEBUG(Serial.println("SD init failed"));
-    while (true) vTaskDelay(portMAX_DELAY);
+    while (true)
+    {
+      vTaskDelay(portMAX_DELAY);
+    }
   }
 
-  if (!Speaker::initMax98357A(8, 22, 15, 44100)) {
+  if (!Speaker::initMax98357A(8, 22, 15, 44100))
+  {
     Logger::log(Logger::Level::Error, "I2S init failed");
     LOGGER_DEBUG(Serial.println("I2S init failed"));
-    while (true) vTaskDelay(portMAX_DELAY);
+    while (true)
+    {
+      vTaskDelay(portMAX_DELAY);
+    }
   }
 
   Speaker::setPlaylist(kTracks, kNumTracks);
   Speaker::startPlayer();  // spawns audio FreeRTOS task inside Speaker
 
-  // Setup button interrupt with highest priority
+  // setup button interrupt with highest priority
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonISR, FALLING);
 
@@ -272,6 +309,7 @@ void setup() {
  * Arduino main loop. runs indefinitely
  * All work is done in FreeRTOS tasks, so this just sleeps forever.
  */
-void loop() {
+void loop()
+{
   vTaskDelay(portMAX_DELAY);
 }

@@ -22,86 +22,133 @@
 #define LOGGER_DEBUG(code) do { (void)0; } while (0)
 #endif
 
-extern "C" {
+extern "C"
+{
 	#include "freertos/FreeRTOS.h"
 	#include "freertos/semphr.h"
 }
 
-namespace Logger {
+namespace Logger
+{
 
-enum class Level : uint8_t {
+enum class Level : uint8_t
+{
 	Info,
 	Warn,
 	Error
 };
 
-// Internal state using function-local statics
+// internal state using function local statics
 
-inline SemaphoreHandle_t& sdMutexRef() {
-	static SemaphoreHandle_t h = nullptr;
-	return h;
+inline SemaphoreHandle_t& sdMutexRef()
+{
+	static SemaphoreHandle_t theHandle = nullptr;
+	return theHandle;
 }
 
-inline const char*& logPathRef() {
-	static const char* p = "/system.log";
-	return p;
+inline const char*& logPathRef()
+{
+	static const char* thePath = "/system.log";
+	return thePath;
 }
 
-inline int& pinRRef() { static int v = -1; return v; }
-inline int& pinGRef() { static int v = -1; return v; }
-inline int& pinBRef() { static int v = -1; return v; }
-
-inline bool& initializedRef() {
-	static bool b = false;
-	return b;
+inline int& pinRRef()
+{
+	static int theValue = -1;
+	return theValue;
 }
 
-// LED control functions
-
-inline void setLed(bool r, bool g, bool b) {
-	int pinR = pinRRef();
-	int pinG = pinGRef();
-	int pinB = pinBRef();
-	if (pinR < 0 || pinG < 0 || pinB < 0) return;
-
-	digitalWrite(pinR, r ? HIGH : LOW);
-	digitalWrite(pinG, g ? HIGH : LOW);
-	digitalWrite(pinB, b ? HIGH : LOW);
+inline int& pinGRef()
+{
+	static int theValue = -1;
+	return theValue;
 }
 
-// LED status indicators
-inline void ledIdle() { setLed(false, true, false); }  // green
-inline void ledBusy() { setLed(false, false, true); }  // blue
-inline void ledWarn() { setLed(true, true, false); }   // yellow
-inline void ledWifi() { setLed(false, true, true); }   // cyan
-inline void ledError() { setLed(true, false, false); } // red
+inline int& pinBRef()
+{
+	static int theValue = -1;
+	return theValue;
+}
 
-// Initialize logger with SD mutex and LED pins
-inline void init(SemaphoreHandle_t sdMutex, const char* logPath, int pinR, int pinG, int pinB) {
-	sdMutexRef() = sdMutex;
-	if (logPath && logPath[0] != '\0') {
-		logPathRef() = logPath;
+inline bool& initializedRef()
+{
+	static bool isInitialized = false;
+	return isInitialized;
+}
+
+// led control functions
+
+inline void setLed(bool aRedState, bool aGreenState, bool aBlueState)
+{
+	int thePinR = pinRRef();
+	int thePinG = pinGRef();
+	int thePinB = pinBRef();
+	if (thePinR < 0 || thePinG < 0 || thePinB < 0)
+	{
+		return;
 	}
 
-	pinRRef() = pinR;
-	pinGRef() = pinG;
-	pinBRef() = pinB;
+	digitalWrite(thePinR, aRedState ? HIGH : LOW);
+	digitalWrite(thePinG, aGreenState ? HIGH : LOW);
+	digitalWrite(thePinB, aBlueState ? HIGH : LOW);
+}
 
-	pinMode(pinR, OUTPUT);
-	pinMode(pinG, OUTPUT);
-	pinMode(pinB, OUTPUT);
+// led status indicators
+inline void ledIdle()
+{
+	setLed(false, true, false);
+}
+
+inline void ledBusy()
+{
+	setLed(false, false, true);
+}
+
+inline void ledWarn()
+{
+	setLed(true, true, false);
+}
+
+inline void ledWifi()
+{
+	setLed(false, true, true);
+}
+
+inline void ledError()
+{
+	setLed(true, false, false);
+}
+
+// initialize logger with sd mutex and led pins
+inline void init(SemaphoreHandle_t anSdMutex, const char* aLogPath, int aPinR, int aPinG, int aPinB)
+{
+	sdMutexRef() = anSdMutex;
+	if (aLogPath && aLogPath[0] != '\0')
+	{
+		logPathRef() = aLogPath;
+	}
+
+	pinRRef() = aPinR;
+	pinGRef() = aPinG;
+	pinBRef() = aPinB;
+
+	pinMode(aPinR, OUTPUT);
+	pinMode(aPinG, OUTPUT);
+	pinMode(aPinB, OUTPUT);
 
 	ledIdle();
 
-	// Write startup message
-	SemaphoreHandle_t m = sdMutexRef();
-	if (m && xSemaphoreTake(m, pdMS_TO_TICKS(10)) == pdTRUE) {
-		File f = SD.open(logPathRef(), FILE_WRITE);
-		if (f) {
-			f.println("=== Logger started ===");
-			f.close();
+	// write startup message
+	SemaphoreHandle_t theMutex = sdMutexRef();
+	if (theMutex && xSemaphoreTake(theMutex, pdMS_TO_TICKS(10)) == pdTRUE)
+	{
+		File theFile = SD.open(logPathRef(), FILE_WRITE);
+		if (theFile)
+		{
+			theFile.println("=== Logger started ===");
+			theFile.close();
 		}
-		xSemaphoreGive(m);
+		xSemaphoreGive(theMutex);
 	}
 
 	initializedRef() = true;
@@ -111,64 +158,83 @@ inline void init(SemaphoreHandle_t sdMutex, const char* logPath, int pinR, int p
  * Internal helper that writes a timestamped log line to the SD card
  * Uses non-blocking semaphore acquisition to avoid interfering with audio playback.
  */
-inline void writeLine(Level level, const char* line) {
-  if (!initializedRef() || !line) return;
+inline void writeLine(Level aLevel, const char* aLine)
+{
+	if (!initializedRef() || !aLine)
+	{
+		return;
+	}
 
-  SemaphoreHandle_t m = sdMutexRef();
-  if (!m) return;
+	SemaphoreHandle_t theMutex = sdMutexRef();
+	if (!theMutex)
+	{
+		return;
+	}
 
-  // Don’t block long if SD is busy (audio), drop the log
-  if (xSemaphoreTake(m, pdMS_TO_TICKS(5)) != pdTRUE) {
-    return;
-  }
+	// dont block long if sd is busy with audio, drop the log
+	if (xSemaphoreTake(theMutex, pdMS_TO_TICKS(5)) != pdTRUE)
+	{
+		return;
+	}
 
-  File f = SD.open(logPathRef(), FILE_WRITE);
-  if (f) {
-    uint32_t t = millis();
-    const char* lvlStr =
-      (level == Level::Info)  ? "INFO"  :
-      (level == Level::Warn)  ? "WARN"  :
-                                "ERROR";
+	File theFile = SD.open(logPathRef(), FILE_WRITE);
+	if (theFile)
+	{
+		uint32_t theTimestamp = millis();
+		const char* theLevelStr =
+			(aLevel == Level::Info)  ? "INFO"  :
+			(aLevel == Level::Warn)  ? "WARN"  :
+			                           "ERROR";
 
-    f.print('[');
-    f.print(t);
-    f.print(" ms][");
-    f.print(lvlStr);
-    f.print("] ");
-    f.println(line);
-    f.close();
-  }
-  else {
-    ledError();
-  }
-
-  xSemaphoreGive(m);
-}
-
-// Public logging API
-
-// Log a message with specified severity level
-inline void log(Level level, const char* msg) {
-	if (!initializedRef() || !msg) return;
-
-	if (level == Level::Error) {
+		theFile.print('[');
+		theFile.print(theTimestamp);
+		theFile.print(" ms][");
+		theFile.print(theLevelStr);
+		theFile.print("] ");
+		theFile.println(aLine);
+		theFile.close();
+	}
+	else
+	{
 		ledError();
 	}
 
-	writeLine(level, msg);
+	xSemaphoreGive(theMutex);
 }
 
-// Log formatted message (printf-style)
-inline void logf(Level level, const char* fmt, ...) {
-	if (!initializedRef() || !fmt) return;
+// public logging api
 
-	char buf[160];
-	va_list args;
-	va_start(args, fmt);
-	vsnprintf(buf, sizeof(buf), fmt, args);
-	va_end(args);
+// log a message with specified severity level
+inline void log(Level aLevel, const char* aMessage)
+{
+	if (!initializedRef() || !aMessage)
+	{
+		return;
+	}
 
-	log(level, buf);
+	if (aLevel == Level::Error)
+	{
+		ledError();
+	}
+
+	writeLine(aLevel, aMessage);
 }
 
-} // namespace Logger
+// log formatted message printf style
+inline void logf(Level aLevel, const char* aFormat, ...)
+{
+	if (!initializedRef() || !aFormat)
+	{
+		return;
+	}
+
+	char theBuffer[160];
+	va_list theArgs;
+	va_start(theArgs, aFormat);
+	vsnprintf(theBuffer, sizeof(theBuffer), aFormat, theArgs);
+	va_end(theArgs);
+
+	log(aLevel, theBuffer);
+}
+
+}
